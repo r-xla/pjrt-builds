@@ -39,15 +39,17 @@ jobs:
             runner: ubuntu-latest
             artifact_name: libpjrt_cpu.so
             shell: bash
-            configure_args: --backend=cpu
-            build_args: --config=clang_local
+            setup: sudo apt-get update && sudo apt-get install -y clang
+            configure_args: --backend=cpu --host_compiler=clang
+            build_args: --config=clang_local --repo_env=CC=clang --repo_env=CXX=clang++
             target: pjrt_c_api_cpu_plugin.so
           - config: {os: linux-arm}
             runner: ubuntu-24.04-arm
             artifact_name: libpjrt_cpu.dylib
             shell: bash
-            configure_args: --backend=cpu
-            build_args: --config=clang_local
+            setup: sudo apt-get update && sudo apt-get install -y clang
+            configure_args: --backend=cpu --host_compiler=clang
+            build_args: --config=clang_local --repo_env=CC=clang --repo_env=CXX=clang++
             target: pjrt_c_api_cpu_plugin.so
           - config: {os: linux, plugin: gpu}
             runner: ubuntu-latest
