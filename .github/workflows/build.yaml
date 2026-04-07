@@ -20,22 +20,30 @@ jobs:
       fail-fast: false
       matrix:
         
-        config: 
+        config:
           - {os: mac}
           - {os: linux}
+          - {os: linux-arm}
           - {os: linux, plugin: gpu}
           - {os: windows}
 
         include:
           - config: {os: mac}
             runner: macos-latest
-            artifact_name: libpjrt_cpu.so
+            artifact_name: libpjrt_cpu.dylib
             shell: bash
             configure_args: --backend=cpu
             build_args: --config=clang_local
             target: pjrt_c_api_cpu_plugin.so
           - config: {os: linux}
             runner: ubuntu-latest
+            artifact_name: libpjrt_cpu.so
+            shell: bash
+            configure_args: --backend=cpu
+            build_args: --config=clang_local
+            target: pjrt_c_api_cpu_plugin.so
+          - config: {os: linux-arm}
+            runner: ubuntu-24.04-arm
             artifact_name: libpjrt_cpu.dylib
             shell: bash
             configure_args: --backend=cpu
