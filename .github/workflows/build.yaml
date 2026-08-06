@@ -26,6 +26,7 @@ jobs:
           - {os: linux-arm}
           - {os: linux, plugin: gpu}
           - {os: windows}
+          - {os: windows-arm}
 
         include:
           - config: {os: mac}
@@ -97,7 +98,47 @@ jobs:
                 --define xnn_enable_avx512fp16=false \
                 --define xnn_enable_avx512bf16=false \
                 --define xnn_enable_hvx=false \
-    
+          - config: {os: windows-arm}
+            runner: windows-11-arm
+            shell: bash
+            artifact_name: pjrt_cpu.dll
+            target: pjrt_c_api_cpu_plugin.so
+            setup: |
+              # Chocolatey's llvm package is x86_64-only, so fetch LLVM's
+              # Windows-on-ARM build to get a clang that targets aarch64.
+              curl -L -o llvm.exe https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-woa64.exe
+              ./llvm.exe /S
+              # Bazel is not preinstalled on the arm64 image.
+              mkdir -p /c/bazel
+              curl -L -o /c/bazel/bazel.exe https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-windows-arm64.exe
+              echo "C:/bazel" >> $GITHUB_PATH
+              # Remove MSVC from PATH to force clang usage
+              echo "PATH=$(echo $PATH | tr ':' '\n' | grep -v 'Microsoft Visual Studio' | grep -v 'VC/Tools/MSVC' | tr '\n' ':')" >> $GITHUB_ENV
+            configure_args: --backend=cpu --os=windows --host_compiler=clang --clang_path=C:/PROGRA~1/LLVM/bin/clang.exe
+            build_args: |
+                --config=clang_local \
+                --action_env=CC=C:/PROGRA~1/LLVM/bin/clang.exe \
+                --action_env=CXX=C:/PROGRA~1/LLVM/bin/clang++.exe \
+                --linkopt="--ld-path=C:/PROGRA~1/LLVM/bin/ld.lld.exe" \
+                --repo_env=BAZEL_COMPILER=C:/PROGRA~1/LLVM/bin/clang.exe \
+                --repo_env=USE_CLANG_CL=1 \
+                --define xnn_enable_riscv_vector=false \
+                --define xnn_enable_riscv_fp16_vector=false \
+                --define xnn_enable_avxvnni=false \
+                --define xnn_enable_avxvnniint8=false \
+                --define xnn_enable_avx256skx=false \
+                --define xnn_enable_avx256vnni=false \
+                --define xnn_enable_avx256vnnigfni=false \
+                --define xnn_enable_avx512f=false \
+                --define xnn_enable_avx512skx=false \
+                --define xnn_enable_avx512vbmi=false \
+                --define xnn_enable_avx512vnni=false \
+                --define xnn_enable_avx512vnnigfni=false \
+                --define xnn_enable_avx512amx=false \
+                --define xnn_enable_avx512fp16=false \
+                --define xnn_enable_avx512bf16=false \
+                --define xnn_enable_hvx=false \
+
     runs-on: ${{ matrix.runner }}
 
     env:
@@ -124,7 +165,7 @@ jobs:
           cat xla_configure.bazelrc
           
       - name: Fix Windows paths in bazelrc
-        if: matrix.config.os == 'windows'
+        if: startsWith(matrix.config.os, 'windows')
         shell: bash
         run: |
           cd xla
