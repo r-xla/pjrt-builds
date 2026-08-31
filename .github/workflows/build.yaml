@@ -78,8 +78,6 @@ jobs:
                 --copt=-DWIN32_LEAN_AND_MEAN --host_copt=-DWIN32_LEAN_AND_MEAN \
                 --copt=-DNOGDI --host_copt=-DNOGDI \
                 --copt=/Zc:preprocessor \
-                --features=compiler_param_file \
-                --features=archive_param_file \
                 --copt=-march=native \
                 --define xnn_enable_arm_fp16_scalar=false \
                 --define xnn_enable_arm_fp16_vector=false \
