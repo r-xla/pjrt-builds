@@ -75,7 +75,6 @@ jobs:
                 --copt=-D_USE_MATH_DEFINES --host_copt=-D_USE_MATH_DEFINES \
                 --copt=-DWIN32_LEAN_AND_MEAN --host_copt=-DWIN32_LEAN_AND_MEAN \
                 --copt=-DNOGDI --host_copt=-DNOGDI \
-                --copt=-march=native \
                 --define xnn_enable_arm_fp16_scalar=false \
                 --define xnn_enable_arm_fp16_vector=false \
                 --define xnn_enable_arm_bf16=false \
