@@ -71,6 +71,11 @@ jobs:
                 --linkopt="--ld-path=C:/PROGRA~1/LLVM/bin/ld.lld.exe" \
                 --repo_env=USE_CLANG_CL=1 \
                 --repo_env=BAZEL_LLVM=C:/PROGRA~1/LLVM \
+                --copt=/DCOMPILER_MSVC --host_copt=/DCOMPILER_MSVC \
+                --copt=/D_USE_MATH_DEFINES --host_copt=/D_USE_MATH_DEFINES \
+                --copt=-DWIN32_LEAN_AND_MEAN --host_copt=-DWIN32_LEAN_AND_MEAN \
+                --copt=-DNOGDI --host_copt=-DNOGDI \
+                --copt=/Zc:preprocessor \
                 --copt=-march=native \
                 --define xnn_enable_arm_fp16_scalar=false \
                 --define xnn_enable_arm_fp16_vector=false \
