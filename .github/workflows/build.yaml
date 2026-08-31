@@ -6,6 +6,12 @@ on:
         description: 'Commit hash to build from (default: 6319f0d)'
         required: false
         default: 6319f0d
+      os:
+        type: choice
+        description: 'Build only this OS (default: all)'
+        required: false
+        default: all
+        options: [all, linux, linux-arm, mac, windows]
 
 name: Build PJRT
 
@@ -13,19 +19,41 @@ permissions:
   contents: write
 
 jobs:
+  # Selects which configs to build. The `os` input narrows the matrix to a
+  # single platform, so a one-platform rebuild doesn't pay for all five. The
+  # matrix context isn't available in a job-level `if`, hence a separate job.
+  matrix:
+    name: Select configs
+    runs-on: ubuntu-latest
+    outputs:
+      config: ${{ steps.select.outputs.config }}
+    steps:
+      - id: select
+        shell: bash
+        env:
+          OS: ${{ inputs.os }}
+        run: |
+          all='[{"os":"mac"},{"os":"linux"},{"os":"linux-arm"},{"os":"linux","plugin":"gpu"},{"os":"windows"}]'
+          if [ -z "$OS" ] || [ "$OS" = "all" ]; then
+            config="$all"
+          else
+            config=$(jq -c --arg os "$OS" '[.[] | select(.os == $os)]' <<<"$all")
+            if [ "$config" = "[]" ]; then
+              echo "::error::no config matches os=$OS"
+              exit 1
+            fi
+          fi
+          echo "Building: $config"
+          echo "config=$config" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build PJRT
+    needs: matrix
 
     strategy:
       fail-fast: false
       matrix:
-        
-        config:
-          - {os: mac}
-          - {os: linux}
-          - {os: linux-arm}
-          - {os: linux, plugin: gpu}
-          - {os: windows}
+        config: ${{ fromJSON(needs.matrix.outputs.config) }}
 
         include:
           - config: {os: mac}
@@ -63,16 +91,13 @@ jobs:
             target: pjrt_c_api_cpu_plugin.so
             setup: |
               choco install llvm -y
-              # Remove MSVC from PATH to force clang usage
-              echo "PATH=$(echo $PATH | tr ':' '\n' | grep -v 'Microsoft Visual Studio' | grep -v 'VC/Tools/MSVC' | tr '\n' ':')" >> $GITHUB_ENV
             configure_args: --backend=cpu --os=windows --host_compiler=clang --clang_path=C:/PROGRA~1/LLVM/bin/clang.exe
             build_args: | 
                 --config=clang_local \
                 --action_env=CC=C:/PROGRA~1/LLVM/bin/clang.exe \
                 --action_env=CXX=C:/PROGRA~1/LLVM/bin/clang++.exe \
                 --linkopt="--ld-path=C:/PROGRA~1/LLVM/bin/ld.lld.exe" \
-                --repo_env=BAZEL_COMPILER=C:/PROGRA~1/LLVM/bin/clang.exe \
-                --repo_env=USE_CLANG_CL=1 \
+                --repo_env=BAZEL_COMPILER=clang-cl \
                 --copt=-march=native \
                 --define xnn_enable_arm_fp16_scalar=false \
                 --define xnn_enable_arm_fp16_vector=false \
