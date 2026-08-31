@@ -63,35 +63,12 @@ jobs:
             target: pjrt_c_api_cpu_plugin.so
             setup: |
               choco install llvm -y
-              # rules_cc's USE_CLANG_CL branch in _get_msvc_vars never populates
-              # DUMPBIN, but the template below reads build_tools["DUMPBIN"]
-              # unconditionally, so USE_CLANG_CL=1 always dies with
-              #   Error: key "DUMPBIN" not found in dictionary
-              # bazelbuild/rules_cc#308, open since 2025-01 and still present in
-              # the current 0.2.22, so there is no version to upgrade to. Patch
-              # the pinned copy and hand it to bazel via --override_module.
-              curl -sSL -o rules_cc.tar.gz \
-                https://github.com/bazelbuild/rules_cc/releases/download/0.2.17/rules_cc-0.2.17.tar.gz
-              mkdir -p /d/rules_cc
-              tar xzf rules_cc.tar.gz -C /d/rules_cc --strip-components=1
-              python - <<'PATCH'
-              import pathlib
-              p = pathlib.Path("D:/rules_cc/cc/private/toolchain/windows_cc_configure.bzl")
-              s = p.read_text()
-              anchor = '        build_tools["LIB"] = find_msvc_tool(repository_ctx, vc_path, "lib.exe", "x64")\n'
-              assert s.count(anchor) == 1, s.count(anchor)
-              s = s.replace(anchor, anchor +
-                  '        build_tools["DUMPBIN"] = find_msvc_tool(repository_ctx, vc_path, "dumpbin.exe", "x64")\n')
-              p.write_text(s)
-              print("patched rules_cc: DUMPBIN registered for the clang-cl branch")
-              PATCH
             configure_args: --backend=cpu --os=windows --host_compiler=clang --clang_path=C:/PROGRA~1/LLVM/bin/clang.exe
             build_args: | 
                 --config=clang_local \
                 --action_env=CC=C:/PROGRA~1/LLVM/bin/clang.exe \
                 --action_env=CXX=C:/PROGRA~1/LLVM/bin/clang++.exe \
                 --linkopt="--ld-path=C:/PROGRA~1/LLVM/bin/ld.lld.exe" \
-                --override_module=rules_cc=D:/rules_cc \
                 --repo_env=USE_CLANG_CL=1 \
                 --repo_env=BAZEL_LLVM=C:/PROGRA~1/LLVM \
                 --copt=-march=native \
@@ -158,6 +135,29 @@ jobs:
 
           echo "Applying patch ---------------"
           git apply ../patch/pjrt/export.patch
+
+          # USE_CLANG_CL=1 trips an upstream rules_cc bug: the clang-cl branch of
+          # _get_msvc_vars fills in CL, ML, LINK and LIB but never DUMPBIN, while
+          # the template below reads build_tools["DUMPBIN"] unconditionally, so
+          # configuration dies with
+          #   Error: key "DUMPBIN" not found in dictionary
+          # bazelbuild/rules_cc#308, open since 2025-01 and still present in the
+          # latest release, so there is no version to upgrade to. XLA fetches
+          # rules_cc through WORKSPACE (bzlmod is off -- see .bazelrc line 2) and
+          # that http_archive already takes a patch list, so add ours to it. That
+          # also keeps XLA's own rules_cc patch, which overriding the repo
+          # wholesale would drop.
+          cp ../patch/pjrt/rules_cc_dumpbin.patch third_party/py/rules_cc_dumpbin.patch
+          python - <<'PATCH'
+          import pathlib
+          p = pathlib.Path("workspace3.bzl")
+          s = p.read_text()
+          anchor = '            "@xla//third_party/py:rules_cc_protobuf.patch",\n'
+          added = '            "@xla//third_party/py:rules_cc_dumpbin.patch",\n'
+          assert s.count(anchor) == 1, s.count(anchor)
+          p.write_text(s.replace(anchor, anchor + added))
+          print("registered rules_cc_dumpbin.patch in workspace3.bzl")
+          PATCH
 
       - run: |
           cd xla
