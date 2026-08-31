@@ -63,17 +63,20 @@ jobs:
             target: pjrt_c_api_cpu_plugin.so
             setup: |
               choco install llvm -y
-              # Remove MSVC from PATH to force clang usage
-              echo "PATH=$(echo $PATH | tr ':' '\n' | grep -v 'Microsoft Visual Studio' | grep -v 'VC/Tools/MSVC' | tr '\n' ':')" >> $GITHUB_ENV
             configure_args: --backend=cpu --os=windows --host_compiler=clang --clang_path=C:/PROGRA~1/LLVM/bin/clang.exe
             build_args: | 
                 --config=clang_local \
                 --action_env=CC=C:/PROGRA~1/LLVM/bin/clang.exe \
                 --action_env=CXX=C:/PROGRA~1/LLVM/bin/clang++.exe \
                 --linkopt="--ld-path=C:/PROGRA~1/LLVM/bin/ld.lld.exe" \
-                --repo_env=BAZEL_COMPILER=C:/PROGRA~1/LLVM/bin/clang.exe \
-                --repo_env=USE_CLANG_CL=1 \
-                --copt=-march=native \
+                --compiler=clang-cl \
+                --extra_toolchains=@local_config_cc//:cc-toolchain-x64_windows-clang-cl \
+                --extra_execution_platforms=@xla//tools/toolchains/win2022:x64_windows-clang-cl \
+                --repo_env=BAZEL_LLVM=C:/PROGRA~1/LLVM \
+                --copt=-DCOMPILER_MSVC --host_copt=-DCOMPILER_MSVC \
+                --copt=-D_USE_MATH_DEFINES --host_copt=-D_USE_MATH_DEFINES \
+                --copt=-DWIN32_LEAN_AND_MEAN --host_copt=-DWIN32_LEAN_AND_MEAN \
+                --copt=-DNOGDI --host_copt=-DNOGDI \
                 --define xnn_enable_arm_fp16_scalar=false \
                 --define xnn_enable_arm_fp16_vector=false \
                 --define xnn_enable_arm_bf16=false \
@@ -137,6 +140,21 @@ jobs:
 
           echo "Applying patch ---------------"
           git apply ../patch/pjrt/export.patch
+
+          # Selecting the clang-cl toolchain needs an execution platform carrying
+          # the clang-cl constraint; --compiler alone only affects the target
+          # configuration, leaving host tools on cl.exe. This mirrors jax's
+          # //jax/tools/toolchains:x64_windows-clang-cl, used by its win_clang
+          # config. See https://bazel.build/configure/windows#clang
+          python - <<'PATCH'
+          import pathlib
+          p = pathlib.Path("tools/toolchains/win2022/BUILD")
+          plat = 'platform(\n    name = "x64_windows-clang-cl",\n    constraint_values = [\n        "@platforms//cpu:x86_64",\n        "@platforms//os:windows",\n        "@bazel_tools//tools/cpp:clang-cl",\n    ],\n)\n'
+          s = p.read_text()
+          assert 'name = "x64_windows-clang-cl"' not in s
+          p.write_text(s + "\n" + plat)
+          print("added x64_windows-clang-cl exec platform")
+          PATCH
 
       - run: |
           cd xla
