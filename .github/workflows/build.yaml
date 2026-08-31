@@ -69,8 +69,17 @@ jobs:
                 --action_env=CC=C:/PROGRA~1/LLVM/bin/clang.exe \
                 --action_env=CXX=C:/PROGRA~1/LLVM/bin/clang++.exe \
                 --linkopt="--ld-path=C:/PROGRA~1/LLVM/bin/ld.lld.exe" \
-                --repo_env=USE_CLANG_CL=1 \
+                --compiler=clang-cl \
+                --extra_toolchains=@local_config_cc//:cc-toolchain-x64_windows-clang-cl \
+                --extra_execution_platforms=@xla//tools/toolchains/win2022:x64_windows-clang-cl \
                 --repo_env=BAZEL_LLVM=C:/PROGRA~1/LLVM \
+                --copt=/DCOMPILER_MSVC --host_copt=/DCOMPILER_MSVC \
+                --copt=/D_USE_MATH_DEFINES --host_copt=/D_USE_MATH_DEFINES \
+                --copt=-DWIN32_LEAN_AND_MEAN --host_copt=-DWIN32_LEAN_AND_MEAN \
+                --copt=-DNOGDI --host_copt=-DNOGDI \
+                --copt=/Zc:preprocessor \
+                --features=compiler_param_file \
+                --features=archive_param_file \
                 --copt=-march=native \
                 --define xnn_enable_arm_fp16_scalar=false \
                 --define xnn_enable_arm_fp16_vector=false \
@@ -136,56 +145,22 @@ jobs:
           echo "Applying patch ---------------"
           git apply ../patch/pjrt/export.patch
 
-          # USE_CLANG_CL=1 trips an upstream rules_cc bug: the clang-cl branch of
-          # _get_msvc_vars fills in CL, ML, LINK and LIB but never DUMPBIN, while
-          # the template below reads build_tools["DUMPBIN"] unconditionally, so
-          # configuration dies with
-          #   Error: key "DUMPBIN" not found in dictionary
-          # bazelbuild/rules_cc#308, open since 2025-01 and still present in the
-          # latest release, so there is no version to upgrade to. XLA fetches
-          # rules_cc through WORKSPACE (bzlmod is off -- see .bazelrc line 2) and
-          # that http_archive already takes a patch list, so add ours to it. That
-          # also keeps XLA's own rules_cc patch, which overriding the repo
-          # wholesale would drop.
-          cp ../patch/pjrt/rules_cc_dumpbin.patch third_party/py/rules_cc_dumpbin.patch
+          # Selecting the clang-cl toolchain needs an execution platform carrying
+          # the clang-cl constraint; --compiler alone only affects the target
+          # configuration, leaving host tools on cl.exe. This mirrors jax's
+          # //jax/tools/toolchains:x64_windows-clang-cl, used by its win_clang
+          # config. See https://bazel.build/configure/windows#clang
           python - <<'PATCH'
           import pathlib
-          p = pathlib.Path("workspace3.bzl")
+          p = pathlib.Path("tools/toolchains/win2022/BUILD")
+          plat = 'platform(\n    name = "x64_windows-clang-cl",\n    constraint_values = [\n        "@platforms//cpu:x86_64",\n        "@platforms//os:windows",\n        "@bazel_tools//tools/cpp:clang-cl",\n    ],\n)\n'
           s = p.read_text()
-          anchor = '            "@xla//third_party/py:rules_cc_protobuf.patch",\n'
-          added = '            "@xla//third_party/py:rules_cc_dumpbin.patch",\n'
-          assert s.count(anchor) == 1, s.count(anchor)
-          p.write_text(s.replace(anchor, anchor + added))
-          print("registered rules_cc_dumpbin.patch in workspace3.bzl")
+          assert 'name = "x64_windows-clang-cl"' not in s
+          p.write_text(s + "\n" + plat)
+          print("added x64_windows-clang-cl exec platform")
           PATCH
 
-          # XLA's net_zstd.BUILD selects decompress/*_amd64.S on any x86_64
-          # platform, Windows included. Those are GNU-syntax assembly, and on
-          # Windows bazel hands .S files to ml64.exe (MASM), which cannot parse
-          # them and rejects the C copts it is passed:
-          #   MASM : fatal error A1013:invalid numerical command-line argument : /W
-          # Drop them on Windows and let zstd use its C fallback. ZSTD_DISABLE_ASM
-          # is set alongside, so the C code cannot reference the asm entry points
-          # we just removed regardless of whether clang-cl defines __GNUC__
-          # (which is what gates ZSTD_ASM_SUPPORTED).
-          python - <<'PATCH'
-          import pathlib
-          p = pathlib.Path("third_party/net_zstd.BUILD")
-          s = p.read_text()
-          a1 = 'licenses(["notice"])\n'
-          cs = 'config_setting(\n    name = "x86_64_windows",\n    constraint_values = [\n        "@platforms//cpu:x86_64",\n        "@platforms//os:windows",\n    ],\n)\n'
-          assert s.count(a1) == 1, s.count(a1)
-          s = s.replace(a1, a1 + "\n" + cs)
-          a2 = '        ":x86_64": glob(["decompress/*_amd64.S"]),\n'
-          assert s.count(a2) == 1, s.count(a2)
-          s = s.replace(a2, '        ":x86_64_windows": [],\n' + a2)
-          a3 = '    includes = ["."],\n'
-          ld = '    local_defines = select({\n        ":x86_64_windows": ["ZSTD_DISABLE_ASM"],\n        "//conditions:default": [],\n    }),\n'
-          assert s.count(a3) == 1, s.count(a3)
-          s = s.replace(a3, a3 + ld)
-          p.write_text(s)
-          print("net_zstd.BUILD: GNU-syntax asm excluded on windows")
-          PATCH
+
 
       - run: |
           cd xla
