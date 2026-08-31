@@ -159,6 +159,34 @@ jobs:
           print("registered rules_cc_dumpbin.patch in workspace3.bzl")
           PATCH
 
+          # XLA's net_zstd.BUILD selects decompress/*_amd64.S on any x86_64
+          # platform, Windows included. Those are GNU-syntax assembly, and on
+          # Windows bazel hands .S files to ml64.exe (MASM), which cannot parse
+          # them and rejects the C copts it is passed:
+          #   MASM : fatal error A1013:invalid numerical command-line argument : /W
+          # Drop them on Windows and let zstd use its C fallback. ZSTD_DISABLE_ASM
+          # is set alongside, so the C code cannot reference the asm entry points
+          # we just removed regardless of whether clang-cl defines __GNUC__
+          # (which is what gates ZSTD_ASM_SUPPORTED).
+          python - <<'PATCH'
+          import pathlib
+          p = pathlib.Path("third_party/net_zstd.BUILD")
+          s = p.read_text()
+          a1 = 'licenses(["notice"])\n'
+          cs = 'config_setting(\n    name = "x86_64_windows",\n    constraint_values = [\n        "@platforms//cpu:x86_64",\n        "@platforms//os:windows",\n    ],\n)\n'
+          assert s.count(a1) == 1, s.count(a1)
+          s = s.replace(a1, a1 + "\n" + cs)
+          a2 = '        ":x86_64": glob(["decompress/*_amd64.S"]),\n'
+          assert s.count(a2) == 1, s.count(a2)
+          s = s.replace(a2, '        ":x86_64_windows": [],\n' + a2)
+          a3 = '    includes = ["."],\n'
+          ld = '    local_defines = select({\n        ":x86_64_windows": ["ZSTD_DISABLE_ASM"],\n        "//conditions:default": [],\n    }),\n'
+          assert s.count(a3) == 1, s.count(a3)
+          s = s.replace(a3, a3 + ld)
+          p.write_text(s)
+          print("net_zstd.BUILD: GNU-syntax asm excluded on windows")
+          PATCH
+
       - run: |
           cd xla
           bazel build ${{ matrix.build_args }} //xla/pjrt/c:${{ matrix.target }}
