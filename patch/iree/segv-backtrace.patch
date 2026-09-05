@@ -1,0 +1,46 @@
+diff --git a/integrations/pjrt/src/iree_pjrt/common/api_impl.cc b/integrations/pjrt/src/iree_pjrt/common/api_impl.cc
+--- a/integrations/pjrt/src/iree_pjrt/common/api_impl.cc
++++ b/integrations/pjrt/src/iree_pjrt/common/api_impl.cc
+@@ -6,6 +6,10 @@
+ 
+ #include "iree_pjrt/common/api_impl.h"
+ 
++// For the opt-in SIGSEGV backtrace below.
++#include <execinfo.h>
++#include <signal.h>
++#include <unistd.h>
+ 
+ #include <iterator>
+ #include <optional>
+@@ -2332,7 +2336,31 @@
+ // Top-level API binding.
+ //===----------------------------------------------------------------------===//
+ 
++// Opt-in native backtrace on a crash, enabled by setting RXLA_TRAP_SEGV.
++//
++// Worth keeping: an embedding host often installs its own SIGSEGV handler that
++// reports only its own call stack -- R's, for instance, stops at the .Call
++// boundary and shows nothing of the plugin or of IREE. Because the plugin is
++// dlopened after the host has started, a handler installed here wins, and the
++// frames it prints are what located the missing topology assignment in
++// OpenDevice(). Resolve the offsets with:
++//   addr2line -f -C -e pjrt_plugin_iree_cpu.so <offset> ...
++extern "C" void rxla_segv_handler(int sig) {
++  void* frames[64];
++  int n = backtrace(frames, 64);
++  const char msg[] = "\n=== native backtrace (plugin SIGSEGV handler) ===\n";
++  ssize_t ignored = write(STDERR_FILENO, msg, sizeof(msg) - 1);
++  (void)ignored;
++  backtrace_symbols_fd(frames, n, STDERR_FILENO);
++  signal(sig, SIG_DFL);
++  raise(sig);
++}
++
+ void BindMonomorphicApi(PJRT_Api* api) {
++  if (getenv("RXLA_TRAP_SEGV")) {
++    signal(SIGSEGV, rxla_segv_handler);
++    signal(SIGBUS, rxla_segv_handler);
++  }
+   api->struct_size = PJRT_Api_STRUCT_SIZE;
+   api->extension_start = nullptr;
+   api->pjrt_api_version.major_version = PJRT_API_MAJOR;

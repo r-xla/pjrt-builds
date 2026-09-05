@@ -1,0 +1,21 @@
+diff --git a/integrations/pjrt/src/iree_pjrt/cpu/client.cc b/integrations/pjrt/src/iree_pjrt/cpu/client.cc
+index 79a2746d9c..e4de25f430 100644
+--- a/integrations/pjrt/src/iree_pjrt/cpu/client.cc
++++ b/integrations/pjrt/src/iree_pjrt/cpu/client.cc
+@@ -19,7 +19,15 @@ CPUClientInstance::CPUClientInstance(std::unique_ptr<Platform> platform)
+   // great.
+   // TODO: Get this when constructing the client so it is guaranteed to
+   // match.
+-  cached_platform_name_ = "iree_cpu";
++  //
++  // r-xla fork: "cpu", not "iree_cpu". The platform name is the key a client
++  // is registered and looked back up under, and r-xla/pjrt registers this
++  // plugin as its "cpu" platform (PJRT_PLUGIN_PATH_CPU), so a device that
++  // reported any other platform could not be resolved back to its client.
++  // Naming it "cpu" makes the plugin a drop-in for the XLA CPU plugin
++  // throughout that stack; which plugin is actually loaded is visible from
++  // PJRT_PLUGIN_PATH_CPU rather than from this string.
++  cached_platform_name_ = "cpu";
+   iree_task_topology_initialize(&task_topology_options_);
+ }
+ 
