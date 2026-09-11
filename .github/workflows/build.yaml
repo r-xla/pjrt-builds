@@ -27,6 +27,29 @@ jobs:
           - {os: linux, plugin: gpu}
           - {os: windows}
 
+        # Compiler flags, briefly:
+        #
+        # * `configure_args` go to XLA's configure.py, which writes
+        #   xla_configure.bazelrc: `--backend=cpu` selects the CPU PJRT
+        #   plugin, `--host_compiler=clang` makes it emit a clang toolchain
+        #   config.
+        # * `--config=clang_local` selects XLA's bazelrc config for building
+        #   with the clang installed on the runner (instead of a
+        #   hermetic/downloaded toolchain).
+        # * `--repo_env=CC/CXX` (and `--action_env` on Windows) pin the
+        #   compiler Bazel's auto-detected C++ toolchain uses to clang.
+        #
+        # We deliberately do NOT set `-march=native` on any platform: the
+        # binaries are distributed to end users, so code generation must stay
+        # at the compiler's baseline for the architecture (plain x86-64 /
+        # armv8). A binary built with `-march=native` inherits whatever ISA
+        # extensions the CI runner happens to have and faults with an illegal
+        # instruction on older user CPUs. CPU-feature-specific fast paths
+        # (AVX2, AVX-512, NEON extensions, ...) are still available to users
+        # whose CPUs have them, because XLA and XNNPACK compile those kernels
+        # per-file with the required target attributes and select them at
+        # *runtime* via CPU-feature dispatch. Nothing else in this build
+        # encodes what the end user's machine must support.
         include:
           - config: {os: mac}
             runner: macos-latest
@@ -45,7 +68,7 @@ jobs:
             target: pjrt_c_api_cpu_plugin.so
           - config: {os: linux-arm}
             runner: ubuntu-24.04-arm
-            artifact_name: libpjrt_cpu.dylib
+            artifact_name: libpjrt_cpu.so
             shell: bash
             setup: sudo apt-get update && sudo apt-get install -y clang
             configure_args: --backend=cpu --host_compiler=clang
@@ -64,7 +87,34 @@ jobs:
             setup: |
               choco install llvm -y
             configure_args: --backend=cpu --os=windows --host_compiler=clang --clang_path=C:/PROGRA~1/LLVM/bin/clang.exe
-            build_args: | 
+            # Windows flags (YAML comments cannot go inside the block scalar
+            # below, so they live here):
+            #
+            # * `--action_env=CC/CXX` and `--linkopt=--ld-path=...` point the
+            #   build at the choco-installed LLVM (clang + lld); XLA cannot be
+            #   built with MSVC.
+            # * `--compiler=clang-cl` plus the `--extra_toolchains` /
+            #   `--extra_execution_platforms` pair select Bazel's *real*
+            #   clang-cl toolchain (which advertises compiler = "clang-cl", so
+            #   dependency select()s resolve to their clang branches). The
+            #   execution platform is appended to XLA's win2022 BUILD file in
+            #   the step below; `--repo_env=BAZEL_LLVM` tells the toolchain
+            #   autoconfiguration where LLVM lives.
+            # * The `-D` defines: XLA's generated embed files need
+            #   `COMPILER_MSVC` (clang-cl defines neither COMPILER_MSVC nor
+            #   __GNUC__, and XLA's own RBE toolchains pass it); the other
+            #   three (`_USE_MATH_DEFINES`, `WIN32_LEAN_AND_MEAN`, `NOGDI`)
+            #   mirror jax's common:windows config. Each has a `--host_copt`
+            #   twin so tools built for the exec configuration get them too.
+            #   They are spelled `-D` (not `/D`) because MSYS path-mangles
+            #   `/D...` arguments into `C:/Program Files/...`.
+            # * The `xnn_enable_*=false` defines exclude XNNPACK micro-kernel
+            #   families that fail to compile with clang-cl on Windows. The
+            #   ARM/RISC-V/HVX ones are irrelevant on x86-64 anyway; excluding
+            #   the AVX-512/VNNI families means Windows users never get those
+            #   fast paths even on CPUs that support them (XNNPACK's runtime
+            #   dispatch can only choose among kernels that were compiled in).
+            build_args: |
                 --config=clang_local \
                 --action_env=CC=C:/PROGRA~1/LLVM/bin/clang.exe \
                 --action_env=CXX=C:/PROGRA~1/LLVM/bin/clang++.exe \
