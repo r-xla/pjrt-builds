@@ -98,9 +98,18 @@ jobs:
           cd stablehlo
           ${{ matrix.patch }}
 
+      # build_mlir.sh defaults CMAKE_BUILD_TYPE to RelWithDebInfo, and
+      # stablehlo-opt statically links the LLVM/MLIR archives it produces. On
+      # ELF the DWARF from those archives is copied into the linked
+      # executable, which is why the Linux binaries were ~2.2 GB against
+      # ~200 MB on macOS, where DWARF stays in the .o files and only a
+      # separate .dSYM carries it. Windows likewise keeps it in a .pdb we
+      # do not ship.
+      # The -DCMAKE_BUILD_TYPE=Release below only covers StableHLO's own
+      # objects, which are a small part of the binary.
       - run: |
           cd stablehlo
-          MLIR_ENABLE_BINDINGS_PYTHON=OFF build_tools/build_mlir.sh "${PWD}"/llvm-project/ "${PWD}"/llvm-build
+          CMAKE_BUILD_TYPE=Release MLIR_ENABLE_BINDINGS_PYTHON=OFF build_tools/build_mlir.sh "${PWD}"/llvm-project/ "${PWD}"/llvm-build
 
       - run: |
           cd stablehlo
@@ -128,6 +137,10 @@ jobs:
           else
             FILENAME="stablehlo-opt-${VERSION}-${OS}-${ARCH}.tar.gz"
             cp stablehlo/build/bin/stablehlo-opt stablehlo-opt
+            # Drops the symbol table and any remaining debug sections. Not
+            # done on Windows: GNU strip from the MSYS shell is not safe on
+            # a PE binary, and its debug info is in a .pdb we do not ship.
+            strip stablehlo-opt
             tar -czvf "$FILENAME" stablehlo-opt
           fi
           echo "FILENAME=$FILENAME" >> $GITHUB_ENV
