@@ -45,7 +45,7 @@ jobs:
             target: pjrt_c_api_cpu_plugin.so
           - config: {os: linux-arm}
             runner: ubuntu-24.04-arm
-            artifact_name: libpjrt_cpu.dylib
+            artifact_name: libpjrt_cpu.so
             shell: bash
             setup: sudo apt-get update && sudo apt-get install -y clang
             configure_args: --backend=cpu --host_compiler=clang
