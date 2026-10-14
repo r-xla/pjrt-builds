@@ -4,7 +4,7 @@
 Reads zml's .github/workflows/_build.yaml (converted to JSON) on stdin and
 prints a GitHub Actions matrix as JSON: the CPU and CUDA rows with their
 bazel flags, targets and artifact names, minus the BuildBuddy remote build
-flags, mapped onto GitHub-hosted runners.
+flags, with the architecture of the linux machine each row builds on.
 """
 
 import json
@@ -16,12 +16,12 @@ TARGETS = {"cpu", "cuda"}
 REMOTE_FLAG = re.compile(r"^--(config=remote|remote_header=.*)$")
 
 
-def runner(row):
+def arch(row):
     # zml cross-compiles every CPU platform (macOS included) on linux x86;
     # CUDA for arm64 builds natively.
     if row["target"] == "cuda" and row["platform"].endswith("arm64"):
-        return "ubuntu-24.04-arm"
-    return "ubuntu-24.04"
+        return "arm64"
+    return "x64"
 
 
 def bazel_versions(workflow):
@@ -54,7 +54,7 @@ def main():
                 "artifact": row["artifact"],
                 "renamed_artifact": row["renamed_artifact"],
                 "bazel_version": versions[row["target"]],
-                "runner": runner(row),
+                "arch": arch(row),
             }
         )
     if {r["target"] for r in include} != TARGETS:

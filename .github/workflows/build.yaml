@@ -24,6 +24,12 @@ on:
         description: "Space-separated builds to run, e.g. 'cpu_linux-amd64 cpu_windows-amd64' (default: all)"
         required: false
         type: string
+      runner:
+        description: "Machines for the linux builds: GitHub-hosted, or RunsOn on our AWS account"
+        required: false
+        type: choice
+        options: [github, runs-on]
+        default: github
       release:
         description: "Publish the plugins as a GitHub release"
         required: false
@@ -112,7 +118,17 @@ jobs:
     name: Build ${{ matrix.target }}_${{ matrix.platform }}
     needs: plan
     if: needs.plan.outputs.matrix != '{"include":[]}'
-    runs-on: ${{ matrix.runner }}
+    # RunsOn: 64 on-demand cores for CUDA (an hour-long build is too likely to
+    # lose a spot instance), 32 spot cores for CPU, and actions/cache backed by
+    # S3 (extras=s3-cache) instead of GitHub's 10 GB.
+    runs-on: >-
+      ${{ inputs.runner == 'runs-on'
+        && format('runs-on={0}/cpu={1}/family={2}/image=ubuntu22-full-{3}/volume=200gb/extras=s3-cache',
+                  github.run_id,
+                  matrix.target == 'cuda' && '64/spot=false' || '32',
+                  matrix.arch == 'arm64' && 'c7g+m7g' || 'c7a+c7i+m7a+m7i',
+                  matrix.arch)
+        || (matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04') }}
     timeout-minutes: 360
     strategy:
       fail-fast: false
@@ -122,6 +138,9 @@ jobs:
       XLA_COMMIT: ${{ matrix.target == 'cuda' && needs.plan.outputs.cuda_xla_commit || needs.plan.outputs.xla_commit }}
       NAME: pjrt-${{ matrix.target }}_${{ matrix.platform }}
     steps:
+      - uses: runs-on/action@v1
+        if: inputs.runner == 'runs-on'
+
       - uses: actions/checkout@v4
         with:
           path: pjrt-builds

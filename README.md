@@ -12,7 +12,8 @@ on our own schedule. `zml.env` names that release. At run time, the `Build PJRT`
 - the build matrix: bazel flags, targets and artifact names (`.github/workflows/_build.yaml`, translated by
   `tools/zml-matrix.py`, which drops the flags for zml's BuildBuddy remote build).
 
-Only the runners (GitHub-hosted) and the release are ours, plus the Windows plugin, which zml does not ship
+Only the runners (GitHub-hosted, or [RunsOn](https://runs-on.com) on our AWS account with `runner: runs-on`) and the
+release are ours, plus the Windows plugin, which zml does not ship
 and which is built from the same `openxla/xla` commit. Patches of our own go into `patch/pjrt/<target>/`
 (`cpu`, `cuda`, `windows`) and are applied on top of zml's.
 
