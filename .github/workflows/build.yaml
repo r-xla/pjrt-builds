@@ -136,11 +136,11 @@ jobs:
         with:
           path: pjrt-builds
 
-      - uses: actions/checkout@v4
-        with:
-          repository: openxla/xla
-          ref: ${{ github.event.inputs.commit_hash }}
-          path: xla
+      # actions/checkout only takes full SHAs; commit_hash is usually short.
+      - name: Clone openxla/xla
+        run: |
+          git clone --filter=blob:none https://github.com/openxla/xla xla
+          git -C xla checkout ${{ github.event.inputs.commit_hash }}
 
       - name: Install LLVM
         run: choco install llvm --version=22.1.8 --allow-downgrade --force -y
