@@ -6,6 +6,16 @@ on:
         description: 'Commit hash to build from (default: 6319f0d)'
         required: false
         default: 6319f0d
+      windows_only:
+        type: boolean
+        description: 'Build only the Windows plugin'
+        required: false
+        default: false
+      release_tag:
+        type: string
+        description: 'Release tag for the Windows plugin (default: pjrt)'
+        required: false
+        default: pjrt
 
 name: Build PJRT
 
@@ -15,6 +25,7 @@ permissions:
 jobs:
   build:
     name: Build PJRT
+    if: ${{ !inputs.windows_only }}
 
     strategy:
       fail-fast: false
@@ -25,7 +36,6 @@ jobs:
           - {os: linux}
           - {os: linux-arm}
           - {os: linux, plugin: gpu}
-          - {os: windows}
 
         include:
           - config: {os: mac}
@@ -56,50 +66,6 @@ jobs:
             artifact_name: libpjrt_gpu.so
             shell: bash
             target: pjrt_c_api_gpu_plugin.so
-          - config: {os: windows}
-            runner: windows-latest
-            shell: bash
-            artifact_name: pjrt_cpu.dll
-            target: pjrt_c_api_cpu_plugin.so
-            setup: |
-              choco install llvm -y
-            configure_args: --backend=cpu --os=windows --host_compiler=clang --clang_path=C:/PROGRA~1/LLVM/bin/clang.exe
-            build_args: | 
-                --config=clang_local \
-                --action_env=CC=C:/PROGRA~1/LLVM/bin/clang.exe \
-                --action_env=CXX=C:/PROGRA~1/LLVM/bin/clang++.exe \
-                --linkopt="--ld-path=C:/PROGRA~1/LLVM/bin/ld.lld.exe" \
-                --compiler=clang-cl \
-                --extra_toolchains=@local_config_cc//:cc-toolchain-x64_windows-clang-cl \
-                --extra_execution_platforms=@xla//tools/toolchains/win2022:x64_windows-clang-cl \
-                --repo_env=BAZEL_LLVM=C:/PROGRA~1/LLVM \
-                --copt=-DCOMPILER_MSVC --host_copt=-DCOMPILER_MSVC \
-                --copt=-D_USE_MATH_DEFINES --host_copt=-D_USE_MATH_DEFINES \
-                --copt=-DWIN32_LEAN_AND_MEAN --host_copt=-DWIN32_LEAN_AND_MEAN \
-                --copt=-DNOGDI --host_copt=-DNOGDI \
-                --define xnn_enable_arm_fp16_scalar=false \
-                --define xnn_enable_arm_fp16_vector=false \
-                --define xnn_enable_arm_bf16=false \
-                --define xnn_enable_arm_dotprod=false \
-                --define xnn_enable_arm_i8mm=false \
-                --define xnn_enable_arm_sme=false \
-                --define xnn_enable_arm_sme2=false \
-                --define xnn_enable_riscv_vector=false \
-                --define xnn_enable_riscv_fp16_vector=false \
-                --define xnn_enable_avxvnni=false \
-                --define xnn_enable_avxvnniint8=false \
-                --define xnn_enable_avx256skx=false \
-                --define xnn_enable_avx256vnni=false \
-                --define xnn_enable_avx256vnnigfni=false \
-                --define xnn_enable_avx512f=false \
-                --define xnn_enable_avx512skx=false \
-                --define xnn_enable_avx512vbmi=false \
-                --define xnn_enable_avx512vnni=false \
-                --define xnn_enable_avx512vnnigfni=false \
-                --define xnn_enable_avx512amx=false \
-                --define xnn_enable_avx512fp16=false \
-                --define xnn_enable_avx512bf16=false \
-                --define xnn_enable_hvx=false \
     
     runs-on: ${{ matrix.runner }}
 
@@ -126,36 +92,6 @@ jobs:
           python configure.py ${{ matrix.configure_args }}
           cat xla_configure.bazelrc
           
-      - name: Fix Windows paths in bazelrc
-        if: matrix.config.os == 'windows'
-        shell: bash
-        run: |
-          cd xla
-          # Fix Windows paths for Bazel compatibility
-          # Replace "Program Files" with short name (handles both / and \ separators)
-          sed -i 's|Program Files|PROGRA~1|g' xla_configure.bazelrc
-          # Convert all backslashes to forward slashes
-          sed -i 's|\\|/|g' xla_configure.bazelrc
-          cat xla_configure.bazelrc
-
-          echo "Applying patch ---------------"
-          git apply ../patch/pjrt/export.patch
-
-          # Selecting the clang-cl toolchain needs an execution platform carrying
-          # the clang-cl constraint; --compiler alone only affects the target
-          # configuration, leaving host tools on cl.exe. This mirrors jax's
-          # //jax/tools/toolchains:x64_windows-clang-cl, used by its win_clang
-          # config. See https://bazel.build/configure/windows#clang
-          python - <<'PATCH'
-          import pathlib
-          p = pathlib.Path("tools/toolchains/win2022/BUILD")
-          plat = 'platform(\n    name = "x64_windows-clang-cl",\n    constraint_values = [\n        "@platforms//cpu:x86_64",\n        "@platforms//os:windows",\n        "@bazel_tools//tools/cpp:clang-cl",\n    ],\n)\n'
-          s = p.read_text()
-          assert 'name = "x64_windows-clang-cl"' not in s
-          p.write_text(s + "\n" + plat)
-          print("added x64_windows-clang-cl exec platform")
-          PATCH
-
       - run: |
           cd xla
           bazel build ${{ matrix.build_args }} //xla/pjrt/c:${{ matrix.target }}
@@ -166,13 +102,8 @@ jobs:
           OS=$(echo "${{ matrix.config.os }}" | cut -d'-' -f1)
           ARCH=$(uname -m)
           cp xla/bazel-bin/xla/pjrt/c/${{ matrix.target }} ${{ matrix.artifact_name }}
-          if [[ "$OS" == "windows" ]]; then
-            FILENAME="pjrt-${VERSION}-${OS}-${ARCH}.zip"
-            7z a "$FILENAME" ${{ matrix.artifact_name }}
-          else
-            FILENAME="pjrt-${VERSION}-${OS}-${ARCH}.tar.gz"
-            tar -czvf "$FILENAME" ${{ matrix.artifact_name }}
-          fi
+          FILENAME="pjrt-${VERSION}-${OS}-${ARCH}.tar.gz"
+          tar -czvf "$FILENAME" ${{ matrix.artifact_name }}
           echo "FILENAME=$FILENAME" >> $GITHUB_ENV
 
       - name: Upload release asset
@@ -181,5 +112,69 @@ jobs:
           files: ${{ env.FILENAME }}
           name: PJRT ${{ matrix.config.plugin}}
           tag_name: pjrt${{matrix.config.plugin}}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Windows is built like JAX builds jaxlib locally on Windows (its win_clang,
+  # avx_windows and clang configs): a local clang-cl and XLA's own bazelrc,
+  # plus bazelrc/windows/xla_configure.bazelrc and patch/pjrt/windows.
+  # Mirrors the cpu windows-amd64 job proposed for zml/pjrt-artifacts.
+  windows:
+    name: Build PJRT (windows)
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    env:
+      VERSION: ${{ github.event.inputs.commit_hash }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pjrt-builds
+
+      - uses: actions/checkout@v4
+        with:
+          repository: openxla/xla
+          ref: ${{ github.event.inputs.commit_hash }}
+          path: xla
+
+      - name: Install LLVM
+        run: choco install llvm --version=22.1.8 --allow-downgrade --force -y
+
+      - name: Apply patches
+        working-directory: xla
+        run: |
+          for patch in ../pjrt-builds/patch/pjrt/windows/*.patch; do
+            echo "Applying $patch"
+            git apply "$patch"
+          done
+          cp ../pjrt-builds/bazelrc/windows/xla_configure.bazelrc .
+
+      - name: Build
+        working-directory: xla
+        run: bazel build //xla/pjrt/c:pjrt_c_api_cpu_plugin.so
+
+      - name: Check that the plugin exports GetPjrtApi
+        run: |
+          "C:/Program Files/LLVM/bin/llvm-readobj.exe" --coff-exports xla/bazel-bin/xla/pjrt/c/pjrt_c_api_cpu_plugin.so | grep -w GetPjrtApi
+
+      - name: Package
+        run: |
+          cp xla/bazel-bin/xla/pjrt/c/pjrt_c_api_cpu_plugin.so pjrt_cpu.dll
+          FILENAME="pjrt-${VERSION}-windows-x86_64.tar.gz"
+          tar -czf "$FILENAME" pjrt_cpu.dll
+          echo "FILENAME=$FILENAME" >> $GITHUB_ENV
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.FILENAME }}
+          name: PJRT ${{ github.event.inputs.release_tag }}
+          tag_name: ${{ github.event.inputs.release_tag }}
+          prerelease: ${{ github.event.inputs.release_tag != 'pjrt' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

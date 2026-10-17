@@ -1,0 +1,35 @@
+From d2f017efb1629c6fd986db71678deb62291a441c Mon Sep 17 00:00:00 2001
+From: Sebastian Fischer <sebastian.fischer@stat.uni-muenchen.de>
+Date: Sat, 17 Oct 2026 08:34:23 +0200
+Subject: [PATCH 2/2] Add a local x64_windows-clang-cl execution platform
+
+---
+ tools/toolchains/win_clang_cl/BUILD | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+ create mode 100644 tools/toolchains/win_clang_cl/BUILD
+
+diff --git a/tools/toolchains/win_clang_cl/BUILD b/tools/toolchains/win_clang_cl/BUILD
+new file mode 100644
+index 00000000..45779b08
+--- /dev/null
++++ b/tools/toolchains/win_clang_cl/BUILD
+@@ -0,0 +1,16 @@
++# Execution platform for local clang-cl builds. Selecting the clang-cl
++# toolchain needs an execution platform carrying the clang-cl constraint;
++# --compiler alone only affects the target configuration, leaving host tools on
++# cl.exe. Mirrors jax's //jax/tools/toolchains:x64_windows-clang-cl.
++# See https://bazel.build/configure/windows#clang
++
++package(default_visibility = ["//visibility:public"])
++
++platform(
++    name = "x64_windows-clang-cl",
++    constraint_values = [
++        "@platforms//cpu:x86_64",
++        "@platforms//os:windows",
++        "@bazel_tools//tools/cpp:clang-cl",
++    ],
++)
+-- 
+2.25.1
+
