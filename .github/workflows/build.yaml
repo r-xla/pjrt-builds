@@ -3,9 +3,8 @@ on:
     inputs:
       commit_hash:
         type: string
-        description: 'Commit hash to build from (default: 6319f0d)'
-        required: false
-        default: 6319f0d
+        description: 'openxla/xla commit to build from (short or full hash)'
+        required: true
       windows_only:
         type: boolean
         description: 'Build only the Windows plugin'
