@@ -1,11 +1,14 @@
 # Windows CPU build with a local clang-cl, as JAX builds jaxlib locally on
 # Windows (its win_clang, avx_windows and clang configs). XLA's .bazelrc
 # imports this file and applies its own `windows` config on top.
-# Bazel finds LLVM in its default location, C:\Program Files\LLVM.
 
 common --config=clang_local
 common --compiler=clang-cl
 common --extra_toolchains=@local_config_cc//:cc-toolchain-x64_windows-clang-cl
+# LLVM as installed by Chocolatey, by its short (8.3) path. Found on its own
+# under "C:\Program Files\LLVM", clang's builtin headers fail Bazel's include
+# check ("absolute path inclusion(s) found ... lib/clang/22/include").
+common --repo_env=BAZEL_LLVM=C:/PROGRA~1/LLVM
 # Added by openxla/patches/windows. XLA's own win_clang config points at a
 # TensorFlow-only platform.
 common --extra_execution_platforms=//tools/toolchains/win_clang_cl:x64_windows-clang-cl
