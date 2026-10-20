@@ -1,0 +1,290 @@
+name: Release PJRT CPU
+
+# Builds the PJRT CPU plugin for every platform r-xla supports from one
+# openxla/xla commit and publishes them as the release pjrt-cpu-<short sha>.
+#
+# linux-amd64, linux-arm64, darwin-arm64 and darwin-amd64 are built the way
+# zml/pjrt-artifacts builds them, with the patches, bazelrc and bazel flags of
+# the pjrt-artifacts ref given below (zml cross-compiles macOS on linux with
+# hermetic toolchains). Their patches have to apply to the XLA commit. Only
+# zml's BuildBuddy remote build is left out. windows-amd64, which zml does not
+# ship, comes from .github/actions/build-windows.
+
+on:
+  workflow_dispatch:
+    inputs:
+      xla_commit:
+        description: "openxla/xla commit (short or full hash)"
+        required: true
+        type: string
+      artifacts:
+        description: "pjrt-artifacts ref whose patches, bazelrc and flags to use, as owner/repo@ref, e.g. zml/pjrt-artifacts@v18.0.0"
+        required: true
+        type: string
+      only:
+        description: "Space-separated builds to run, e.g. 'cpu_linux-amd64 cpu_windows-amd64'. Skips the release."
+        required: false
+        type: string
+      runner:
+        description: "Machines for the linux builds: GitHub-hosted, or RunsOn on our AWS account"
+        required: false
+        type: choice
+        options: [github, runs-on]
+        default: github
+
+permissions:
+  contents: write
+
+env:
+  # Minutes bazel may build before it is stopped so that the job can still
+  # save its cache within GitHub's 6 hour job limit. Re-running the failed job
+  # continues from that cache.
+  BUILD_MINUTES: 300
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      windows: ${{ steps.matrix.outputs.windows }}
+      xla_commit: ${{ steps.xla.outputs.commit }}
+      tag: ${{ steps.xla.outputs.tag }}
+      artifacts_repo: ${{ steps.artifacts.outputs.repo }}
+      artifacts_sha: ${{ steps.artifacts.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse the pjrt-artifacts ref
+        id: ref
+        env:
+          ARTIFACTS: ${{ inputs.artifacts }}
+        run: |
+          if [[ ! "$ARTIFACTS" =~ ^([^/@]+/[^/@]+)@(.+)$ ]]; then
+            echo "::error::artifacts must look like owner/repo@ref, got '$ARTIFACTS'"
+            exit 1
+          fi
+          echo "repo=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          echo "ref=${BASH_REMATCH[2]}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.ref.outputs.repo }}
+          ref: ${{ steps.ref.outputs.ref }}
+          path: artifacts
+
+      - name: Pin the pjrt-artifacts commit
+        id: artifacts
+        run: |
+          echo "repo=${{ steps.ref.outputs.repo }}" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git -C artifacts rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Fails here, not hours into the builds, when the patches don't apply.
+      - name: Resolve the XLA commit and check the patches apply
+        id: xla
+        env:
+          XLA_COMMIT: ${{ inputs.xla_commit }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone --filter=blob:none https://github.com/openxla/xla xla
+          sha=$(git -C xla rev-parse --verify "$XLA_COMMIT^{commit}")
+          git -C xla checkout -q "$sha"
+          shopt -s nullglob
+          # Each set in order, as the builds apply them.
+          for set in "artifacts/openxla/patches/upstream/*.patch artifacts/openxla/patches/upstream-cpu/*.patch patch/pjrt/cpu/*.patch" "patch/pjrt/windows/*.patch"; do
+            for patch in $set; do
+              git -C xla apply "../$patch" || { echo "::error::$patch does not apply to openxla/xla@$sha"; exit 1; }
+              echo "ok $patch"
+            done
+            git -C xla checkout -q . && git -C xla clean -qfd
+          done
+          tag="pjrt-cpu-${sha:0:7}"
+          if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $tag already exists. Delete it first to rebuild it."
+            exit 1
+          fi
+          echo "commit=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Derive the build matrix from pjrt-artifacts'
+        id: matrix
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          matrix=$(yq -o=json artifacts/.github/workflows/_build.yaml | python3 tools/zml-matrix.py \
+            | jq -c '.include |= map(select(.target == "cpu"))')
+          if [ "$(jq '.include | length' <<< "$matrix")" != 4 ]; then
+            echo "::error::Expected 4 CPU builds in the pjrt-artifacts matrix"
+            jq . <<< "$matrix"
+            exit 1
+          fi
+          windows=true
+          if [ -n "$ONLY" ]; then
+            matrix=$(jq -c --arg only "$ONLY" '
+              ($only | split(" ")) as $keep
+              | .include |= map(select((.target + "_" + .platform) as $k | $keep | index($k)))
+            ' <<< "$matrix")
+            [[ " $ONLY " == *" cpu_windows-amd64 "* ]] || windows=false
+          fi
+          jq . <<< "$matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "windows=$windows" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}_${{ matrix.platform }}
+    needs: plan
+    if: needs.plan.outputs.matrix != '{"include":[]}'
+    # RunsOn: 32 spot cores and actions/cache backed by S3 (extras=s3-cache)
+    # instead of GitHub's 10 GB.
+    runs-on: >-
+      ${{ inputs.runner == 'runs-on'
+        && format('runs-on={0}/cpu=32/family={1}/image=ubuntu22-full-{2}/volume=200gb/extras=s3-cache',
+                  github.run_id,
+                  matrix.arch == 'arm64' && 'c7g+m7g' || 'c7a+c7i+m7a+m7i',
+                  matrix.arch)
+        || (matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04') }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      XLA_COMMIT: ${{ needs.plan.outputs.xla_commit }}
+      NAME: pjrt-${{ matrix.target }}_${{ matrix.platform }}
+    steps:
+      - uses: runs-on/action@v1
+        if: inputs.runner == 'runs-on'
+
+      - uses: actions/checkout@v4
+        with:
+          path: pjrt-builds
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.plan.outputs.artifacts_repo }}
+          ref: ${{ needs.plan.outputs.artifacts_sha }}
+          path: artifacts
+
+      - uses: actions/checkout@v4
+        with:
+          repository: openxla/xla
+          ref: ${{ env.XLA_COMMIT }}
+          path: xla
+
+      # Like pjrt-artifacts' CPU build: its patches and bazelrc on top of
+      # openxla/xla, then ours.
+      - name: Apply patches
+        working-directory: xla
+        run: |
+          shopt -s nullglob
+          patches=(../artifacts/openxla/patches/upstream/*.patch ../artifacts/openxla/patches/upstream-cpu/*.patch ../pjrt-builds/patch/pjrt/cpu/*.patch)
+          cp ../artifacts/openxla/bazelrc/upstream/.bazelrc ../artifacts/openxla/bazelrc/upstream/*.bazelrc .
+          for patch in "${patches[@]}"; do
+            echo "Applying $patch"
+            git apply "$patch"
+          done
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          sudo mkdir -p /mnt/bazel
+          sudo chown "$USER" /mnt/bazel
+          df -h
+
+      - uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          bazelisk-version: 1.26.0
+          bazelisk-cache: false
+          bazelrc: |
+            startup --output_user_root=/mnt/bazel/root
+            common --disk_cache=/mnt/bazel/disk
+            common --verbose_failures
+            common --color=yes
+            common --show_timestamps
+
+      - name: Restore the cache of an earlier attempt
+        uses: actions/cache/restore@v4
+        with:
+          path: /mnt/bazel/disk
+          key: bazel-${{ env.NAME }}-${{ env.XLA_COMMIT }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: bazel-${{ env.NAME }}-${{ env.XLA_COMMIT }}-
+
+      - name: Build
+        id: build
+        working-directory: xla
+        env:
+          USE_BAZEL_VERSION: ${{ matrix.bazel_version }}
+        run: |
+          status=0
+          timeout --signal=INT "${BUILD_MINUTES}m" \
+            bazel build ${{ matrix.config }} ${{ matrix.bazel_target }} || status=$?
+          if [ "$status" = 124 ]; then
+            echo "::error::Stopped after $BUILD_MINUTES minutes. Re-run the failed job to continue from the saved cache."
+          fi
+          exit "$status"
+
+      - name: Save the cache for a re-run
+        if: failure() && steps.build.outcome == 'failure'
+        uses: actions/cache/save@v4
+        with:
+          path: /mnt/bazel/disk
+          key: bazel-${{ env.NAME }}-${{ env.XLA_COMMIT }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Package
+        run: |
+          cp xla/${{ matrix.artifact }} ${{ matrix.renamed_artifact }}
+          tar -czf "$NAME.tar.gz" ${{ matrix.renamed_artifact }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: ${{ env.NAME }}.tar.gz
+
+  windows:
+    name: Build cpu_windows-amd64
+    needs: plan
+    if: needs.plan.outputs.windows == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pjrt-builds
+
+      - uses: ./pjrt-builds/.github/actions/build-windows
+        with:
+          xla_commit: ${{ needs.plan.outputs.xla_commit }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pjrt-cpu_windows-amd64
+          path: pjrt-cpu_windows-amd64.tar.gz
+
+  release:
+    needs: [plan, build, windows]
+    # Only complete sets: no release for runs restricted with `only`.
+    if: ${{ !cancelled() && inputs.only == '' && needs.build.result == 'success' && needs.windows.result == 'success' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Check that all five plugins are there
+        run: |
+          ls -l dist
+          for p in linux-amd64 linux-arm64 darwin-arm64 darwin-amd64 windows-amd64; do
+            test -f "dist/pjrt-cpu_$p.tar.gz" || { echo "::error::missing pjrt-cpu_$p.tar.gz"; exit 1; }
+          done
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.plan.outputs.tag }}
+          name: PJRT CPU ${{ needs.plan.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          body: |
+            PJRT CPU plugins built from openxla/xla@${{ needs.plan.outputs.xla_commit }}.
+
+            - linux-amd64, linux-arm64, darwin-arm64, darwin-amd64: patches, bazelrc and bazel flags of ${{ needs.plan.outputs.artifacts_repo }}@${{ needs.plan.outputs.artifacts_sha }}
+            - windows-amd64: .github/actions/build-windows of r-xla/pjrt-builds@${{ github.sha }}

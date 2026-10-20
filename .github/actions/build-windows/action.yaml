@@ -1,0 +1,53 @@
+name: Build the Windows CPU plugin
+description: >-
+  Builds pjrt-cpu_windows-amd64.tar.gz (pjrt_cpu.dll) from an openxla/xla
+  commit, like JAX builds jaxlib locally on Windows: a local clang-cl, XLA's
+  own bazelrc plus bazelrc/windows/xla_configure.bazelrc, and
+  patch/pjrt/windows. Needs this repository checked out at pjrt-builds/.
+
+inputs:
+  xla_commit:
+    description: openxla/xla commit (short or full hash)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # actions/checkout only takes full SHAs.
+    - name: Clone openxla/xla
+      shell: bash
+      run: |
+        git clone --filter=blob:none https://github.com/openxla/xla xla
+        git -C xla checkout "${{ inputs.xla_commit }}"
+
+    # The runner image's LLVM. With 22.1.8, Bazel's include check rejects
+    # clang's builtin headers (lib/clang/22/include).
+    - name: Install LLVM
+      shell: bash
+      run: choco install llvm --version=20.1.8 --allow-downgrade -y
+
+    - name: Apply patches
+      shell: bash
+      working-directory: xla
+      run: |
+        for patch in ../pjrt-builds/patch/pjrt/windows/*.patch; do
+          echo "Applying $patch"
+          git apply "$patch"
+        done
+        cp ../pjrt-builds/bazelrc/windows/xla_configure.bazelrc .
+
+    - name: Build
+      shell: bash
+      working-directory: xla
+      run: bazel build //xla/pjrt/c:pjrt_c_api_cpu_plugin.so
+
+    - name: Check that the plugin exports GetPjrtApi
+      shell: bash
+      run: |
+        "C:/Program Files/LLVM/bin/llvm-readobj.exe" --coff-exports xla/bazel-bin/xla/pjrt/c/pjrt_c_api_cpu_plugin.so | grep -w GetPjrtApi
+
+    - name: Package
+      shell: bash
+      run: |
+        cp xla/bazel-bin/xla/pjrt/c/pjrt_c_api_cpu_plugin.so pjrt_cpu.dll
+        tar -czf pjrt-cpu_windows-amd64.tar.gz pjrt_cpu.dll

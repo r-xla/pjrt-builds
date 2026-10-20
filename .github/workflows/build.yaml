@@ -242,94 +242,19 @@ jobs:
     if: needs.plan.outputs.windows == 'true'
     runs-on: windows-latest
     timeout-minutes: 360
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: pjrt-builds
 
-      - run: choco install llvm -y
-
-      - run: |
-          git clone https://github.com/openxla/xla
-          cd xla
-          git checkout ${{ needs.plan.outputs.xla_commit }}
-
-      - run: |
-          cd xla
-          python configure.py --backend=cpu --os=windows --host_compiler=clang --clang_path=C:/PROGRA~1/LLVM/bin/clang.exe
-          # Bazel wants short, forward-slashed paths.
-          sed -i 's|Program Files|PROGRA~1|g' xla_configure.bazelrc
-          sed -i 's|\\|/|g' xla_configure.bazelrc
-          cat xla_configure.bazelrc
-
-          git apply ../patch/pjrt/windows/export.patch
-
-          # Selecting the clang-cl toolchain needs an execution platform carrying
-          # the clang-cl constraint; --compiler alone only affects the target
-          # configuration, leaving host tools on cl.exe. This mirrors jax's
-          # //jax/tools/toolchains:x64_windows-clang-cl, used by its win_clang
-          # config. See https://bazel.build/configure/windows#clang
-          python - <<'PATCH'
-          import pathlib
-          p = pathlib.Path("tools/toolchains/win2022/BUILD")
-          plat = 'platform(\n    name = "x64_windows-clang-cl",\n    constraint_values = [\n        "@platforms//cpu:x86_64",\n        "@platforms//os:windows",\n        "@bazel_tools//tools/cpp:clang-cl",\n    ],\n)\n'
-          s = p.read_text()
-          assert 'name = "x64_windows-clang-cl"' not in s
-          p.write_text(s + "\n" + plat)
-          print("added x64_windows-clang-cl exec platform")
-          PATCH
-
-      - name: Build
-        run: |
-          cd xla
-          bazel build \
-            --config=clang_local \
-            --action_env=CC=C:/PROGRA~1/LLVM/bin/clang.exe \
-            --action_env=CXX=C:/PROGRA~1/LLVM/bin/clang++.exe \
-            --linkopt="--ld-path=C:/PROGRA~1/LLVM/bin/ld.lld.exe" \
-            --compiler=clang-cl \
-            --extra_toolchains=@local_config_cc//:cc-toolchain-x64_windows-clang-cl \
-            --extra_execution_platforms=@xla//tools/toolchains/win2022:x64_windows-clang-cl \
-            --repo_env=BAZEL_LLVM=C:/PROGRA~1/LLVM \
-            --copt=-DCOMPILER_MSVC --host_copt=-DCOMPILER_MSVC \
-            --copt=-D_USE_MATH_DEFINES --host_copt=-D_USE_MATH_DEFINES \
-            --copt=-DWIN32_LEAN_AND_MEAN --host_copt=-DWIN32_LEAN_AND_MEAN \
-            --copt=-DNOGDI --host_copt=-DNOGDI \
-            --define xnn_enable_arm_fp16_scalar=false \
-            --define xnn_enable_arm_fp16_vector=false \
-            --define xnn_enable_arm_bf16=false \
-            --define xnn_enable_arm_dotprod=false \
-            --define xnn_enable_arm_i8mm=false \
-            --define xnn_enable_arm_sme=false \
-            --define xnn_enable_arm_sme2=false \
-            --define xnn_enable_riscv_vector=false \
-            --define xnn_enable_riscv_fp16_vector=false \
-            --define xnn_enable_avxvnni=false \
-            --define xnn_enable_avxvnniint8=false \
-            --define xnn_enable_avx256skx=false \
-            --define xnn_enable_avx256vnni=false \
-            --define xnn_enable_avx256vnnigfni=false \
-            --define xnn_enable_avx512f=false \
-            --define xnn_enable_avx512skx=false \
-            --define xnn_enable_avx512vbmi=false \
-            --define xnn_enable_avx512vnni=false \
-            --define xnn_enable_avx512vnnigfni=false \
-            --define xnn_enable_avx512amx=false \
-            --define xnn_enable_avx512fp16=false \
-            --define xnn_enable_avx512bf16=false \
-            --define xnn_enable_hvx=false \
-            //xla/pjrt/c:pjrt_c_api_cpu_plugin.so
-
-      - name: Package
-        run: |
-          cp xla/bazel-bin/xla/pjrt/c/pjrt_c_api_cpu_plugin.so pjrt_cpu.dll
-          7z a pjrt-cpu_windows-amd64.zip pjrt_cpu.dll
+      - uses: ./pjrt-builds/.github/actions/build-windows
+        with:
+          xla_commit: ${{ needs.plan.outputs.xla_commit }}
 
       - uses: actions/upload-artifact@v4
         with:
           name: pjrt-cpu_windows-amd64
-          path: pjrt-cpu_windows-amd64.zip
+          path: pjrt-cpu_windows-amd64.tar.gz
 
   release:
     needs: [plan, build, windows]
