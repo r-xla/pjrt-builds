@@ -30,7 +30,7 @@ two inputs:
 - `artifacts`: the pjrt-artifacts ref whose patches, bazelrc and bazel flags the non-Windows builds use, as
   `owner/repo@ref`. zml's patches only apply to commits near their pin, so a newer XLA commit needs a ref
   with rebased patches, e.g. `zml/pjrt-artifacts@v18.0.0` for `6b73c4c`,
-  `sebffischer/pjrt-artifacts@bump-xla-2026-10-16` for `2ea1e04`.
+  `sebffischer/pjrt-artifacts@bump-xla-2026-10-21` for `aa1e72c`.
 
 The run checks first that all patches apply and that the release does not exist yet. `only` restricts it to
 some builds and then skips the release.
