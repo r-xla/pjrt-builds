@@ -1,247 +1,133 @@
-name: Build PJRT
-
-# Builds the PJRT plugins of the zml/pjrt-artifacts release pinned in zml.env:
-# its XLA commits, its patches and its bazel flags, read from that release at
-# run time. Only the runners and the release are ours. Windows, which zml does
-# not ship, is built from the same XLA commit with our own toolchain setup.
-
 on:
   workflow_dispatch:
     inputs:
-      xla_commit:
-        description: "openxla/xla commit for the CPU plugins (default: the one zml pins)"
-        required: false
+      commit_hash:
         type: string
-      cuda_xla_commit:
-        description: "zml/xla commit for the CUDA plugins (default: the one zml pins)"
-        required: false
-        type: string
-      cuda_compute_capabilities:
-        description: "HERMETIC_CUDA_COMPUTE_CAPABILITIES, e.g. 8.0,9.0 (default: zml's list)"
-        required: false
-        type: string
-      only:
-        description: "Space-separated builds to run, e.g. 'cpu_linux-amd64 cpu_windows-amd64' (default: all)"
-        required: false
-        type: string
-      runner:
-        description: "Machines for the linux builds: GitHub-hosted, or RunsOn on our AWS account"
-        required: false
-        type: choice
-        options: [github, runs-on]
-        default: github
-      release:
-        description: "Publish the plugins as a GitHub release"
-        required: false
+        description: 'openxla/xla commit to build from (short or full hash)'
+        required: true
+      windows_only:
         type: boolean
-        default: false
-      tag:
-        description: "Release tag (default: zml-<ZML_REF>; required when overriding a commit)"
+        description: 'Build only the Windows plugin'
         required: false
+        default: false
+      release_tag:
         type: string
+        description: 'Release tag for the Windows plugin (default: pjrt)'
+        required: false
+        default: pjrt
+
+name: Build PJRT
 
 permissions:
   contents: write
 
-env:
-  # Minutes bazel may build before it is stopped so that the job can still
-  # save its cache within GitHub's 6 hour job limit. Re-running the failed job
-  # continues from that cache.
-  BUILD_MINUTES: 300
-
 jobs:
-  plan:
-    runs-on: ubuntu-24.04
-    outputs:
-      matrix: ${{ steps.matrix.outputs.matrix }}
-      zml_sha: ${{ steps.pins.outputs.zml_sha }}
-      xla_commit: ${{ steps.pins.outputs.xla_commit }}
-      cuda_xla_commit: ${{ steps.pins.outputs.cuda_xla_commit }}
-      tag: ${{ steps.pins.outputs.tag }}
-      windows: ${{ steps.matrix.outputs.windows }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Read zml.env
-        run: |
-          source zml.env
-          echo "ZML_REF=$ZML_REF" >> "$GITHUB_ENV"
-
-      - uses: actions/checkout@v4
-        with:
-          repository: zml/pjrt-artifacts
-          ref: ${{ env.ZML_REF }}
-          path: zml
-
-      - name: Resolve pins
-        id: pins
-        env:
-          INPUT_XLA_COMMIT: ${{ inputs.xla_commit }}
-          INPUT_CUDA_XLA_COMMIT: ${{ inputs.cuda_xla_commit }}
-          INPUT_TAG: ${{ inputs.tag }}
-        run: |
-          source zml/openxla/commits.env
-          tag="$INPUT_TAG"
-          if [ -z "$tag" ]; then
-            if [ -n "$INPUT_XLA_COMMIT$INPUT_CUDA_XLA_COMMIT" ]; then
-              echo "::error::Overriding an XLA commit needs an explicit tag"
-              exit 1
-            fi
-            tag="zml-$ZML_REF"
-          fi
-          {
-            echo "zml_sha=$(git -C zml rev-parse HEAD)"
-            echo "xla_commit=${INPUT_XLA_COMMIT:-$XLA_COMMIT}"
-            echo "cuda_xla_commit=${INPUT_CUDA_XLA_COMMIT:-$CUDA_XLA_COMMIT}"
-            echo "tag=$tag"
-          } | tee -a "$GITHUB_OUTPUT"
-
-      - name: Derive the build matrix from zml's
-        id: matrix
-        env:
-          ONLY: ${{ inputs.only }}
-        run: |
-          matrix=$(yq -o=json zml/.github/workflows/_build.yaml | python3 tools/zml-matrix.py)
-          windows=true
-          if [ -n "$ONLY" ]; then
-            matrix=$(jq -c --arg only "$ONLY" '
-              ($only | split(" ")) as $keep
-              | .include |= map(select((.target + "_" + .platform) as $k | $keep | index($k)))
-            ' <<< "$matrix")
-            [[ " $ONLY " == *" cpu_windows-amd64 "* ]] || windows=false
-          fi
-          echo "$matrix" | jq .
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "windows=$windows" >> "$GITHUB_OUTPUT"
-
   build:
-    name: Build ${{ matrix.target }}_${{ matrix.platform }}
-    needs: plan
-    if: needs.plan.outputs.matrix != '{"include":[]}'
-    # RunsOn: 64 on-demand cores for CUDA (an hour-long build is too likely to
-    # lose a spot instance), 32 spot cores for CPU, and actions/cache backed by
-    # S3 (extras=s3-cache) instead of GitHub's 10 GB.
-    runs-on: >-
-      ${{ inputs.runner == 'runs-on'
-        && format('runs-on={0}/cpu={1}/family={2}/image=ubuntu22-full-{3}/volume=200gb/extras=s3-cache',
-                  github.run_id,
-                  matrix.target == 'cuda' && '64/spot=false' || '32',
-                  matrix.arch == 'arm64' && 'c7g+m7g' || 'c7a+c7i+m7a+m7i',
-                  matrix.arch)
-        || (matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04') }}
-    timeout-minutes: 360
+    name: Build PJRT
+    if: ${{ !inputs.windows_only }}
+
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      matrix:
+        
+        config:
+          - {os: mac}
+          - {os: linux}
+          - {os: linux-arm}
+          - {os: linux, plugin: gpu}
+
+        include:
+          - config: {os: mac}
+            runner: macos-latest
+            artifact_name: libpjrt_cpu.dylib
+            shell: bash
+            configure_args: --backend=cpu
+            build_args: --config=clang_local
+            target: pjrt_c_api_cpu_plugin.so
+          - config: {os: linux}
+            runner: ubuntu-latest
+            artifact_name: libpjrt_cpu.so
+            shell: bash
+            setup: sudo apt-get update && sudo apt-get install -y clang
+            configure_args: --backend=cpu --host_compiler=clang
+            build_args: --config=clang_local --repo_env=CC=clang --repo_env=CXX=clang++
+            target: pjrt_c_api_cpu_plugin.so
+          - config: {os: linux-arm}
+            runner: ubuntu-24.04-arm
+            artifact_name: libpjrt_cpu.so
+            shell: bash
+            setup: sudo apt-get update && sudo apt-get install -y clang
+            configure_args: --backend=cpu --host_compiler=clang
+            build_args: --config=clang_local --repo_env=CC=clang --repo_env=CXX=clang++
+            target: pjrt_c_api_cpu_plugin.so
+          - config: {os: linux, plugin: gpu}
+            runner: ubuntu-latest
+            artifact_name: libpjrt_gpu.so
+            shell: bash
+            target: pjrt_c_api_gpu_plugin.so
+    
+    runs-on: ${{ matrix.runner }}
+
     env:
-      XLA_REPO: ${{ matrix.target == 'cuda' && 'zml/xla' || 'openxla/xla' }}
-      XLA_COMMIT: ${{ matrix.target == 'cuda' && needs.plan.outputs.cuda_xla_commit || needs.plan.outputs.xla_commit }}
-      NAME: pjrt-${{ matrix.target }}_${{ matrix.platform }}
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ github.event.inputs.commit_hash }}
+
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+
     steps:
-      - uses: runs-on/action@v1
-        if: inputs.runner == 'runs-on'
-
       - uses: actions/checkout@v4
-        with:
-          path: pjrt-builds
 
-      - uses: actions/checkout@v4
-        with:
-          repository: zml/pjrt-artifacts
-          ref: ${{ needs.plan.outputs.zml_sha }}
-          path: zml
+      - run: ${{ matrix.setup }}
 
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ env.XLA_REPO }}
-          ref: ${{ env.XLA_COMMIT }}
-          path: xla
+      - run: |
+          git clone https://github.com/openxla/xla
+          cd xla
+          git checkout ${{ github.event.inputs.commit_hash }}
 
-      # Mirrors zml: the CPU build applies their patches and bazelrc to
-      # openxla/xla; zml/xla, which the CUDA build uses, already carries both.
-      # Our own patches go on top.
-      - name: Apply patches
-        working-directory: xla
+      - run: |
+          cd xla
+          python configure.py ${{ matrix.configure_args }}
+          cat xla_configure.bazelrc
+          
+      - run: |
+          cd xla
+          bazel build ${{ matrix.build_args }} //xla/pjrt/c:${{ matrix.target }}
+
+      - name: Rename binary with OS info
+        shell: bash
         run: |
-          shopt -s nullglob
-          patches=()
-          if [ "${{ matrix.target }}" = cpu ]; then
-            patches+=(../zml/openxla/patches/upstream/*.patch ../zml/openxla/patches/upstream-cpu/*.patch)
-            cp ../zml/openxla/bazelrc/upstream/.bazelrc ../zml/openxla/bazelrc/upstream/*.bazelrc .
-          fi
-          patches+=(../pjrt-builds/patch/pjrt/${{ matrix.target }}/*.patch)
-          for patch in "${patches[@]}"; do
-            echo "Applying $patch"
-            git apply "$patch"
-          done
+          OS=$(echo "${{ matrix.config.os }}" | cut -d'-' -f1)
+          ARCH=$(uname -m)
+          cp xla/bazel-bin/xla/pjrt/c/${{ matrix.target }} ${{ matrix.artifact_name }}
+          FILENAME="pjrt-${VERSION}-${OS}-${ARCH}.tar.gz"
+          tar -czvf "$FILENAME" ${{ matrix.artifact_name }}
+          echo "FILENAME=$FILENAME" >> $GITHUB_ENV
 
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          sudo mkdir -p /mnt/bazel
-          sudo chown "$USER" /mnt/bazel
-          df -h
-
-      - uses: bazel-contrib/setup-bazel@0.15.0
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
         with:
-          bazelisk-version: 1.26.0
-          bazelisk-cache: false
-          bazelrc: |
-            startup --output_user_root=/mnt/bazel/root
-            common --disk_cache=/mnt/bazel/disk
-            common --verbose_failures
-            common --color=yes
-            common --show_timestamps
-
-      - name: Restore the cache of an earlier attempt
-        uses: actions/cache/restore@v4
-        with:
-          path: /mnt/bazel/disk
-          key: bazel-${{ env.NAME }}-${{ env.XLA_COMMIT }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: bazel-${{ env.NAME }}-${{ env.XLA_COMMIT }}-
-
-      - name: Build
-        id: build
-        working-directory: xla
+          files: ${{ env.FILENAME }}
+          name: PJRT ${{ matrix.config.plugin}}
+          tag_name: pjrt${{matrix.config.plugin}}
         env:
-          USE_BAZEL_VERSION: ${{ matrix.bazel_version }}
-          CUDA_COMPUTE_CAPABILITIES: ${{ inputs.cuda_compute_capabilities }}
-        run: |
-          extra=()
-          if [ "${{ matrix.target }}" = cuda ] && [ -n "$CUDA_COMPUTE_CAPABILITIES" ]; then
-            extra+=("--repo_env=HERMETIC_CUDA_COMPUTE_CAPABILITIES=$CUDA_COMPUTE_CAPABILITIES")
-          fi
-          status=0
-          timeout --signal=INT "${BUILD_MINUTES}m" \
-            bazel build ${{ matrix.config }} "${extra[@]}" ${{ matrix.bazel_target }} || status=$?
-          if [ "$status" = 124 ]; then
-            echo "::error::Stopped after $BUILD_MINUTES minutes. Re-run the failed job to continue from the saved cache."
-          fi
-          exit "$status"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Save the cache for a re-run
-        if: failure() && steps.build.outcome == 'failure'
-        uses: actions/cache/save@v4
-        with:
-          path: /mnt/bazel/disk
-          key: bazel-${{ env.NAME }}-${{ env.XLA_COMMIT }}-${{ github.run_id }}-${{ github.run_attempt }}
-
-      - name: Package
-        run: |
-          cp xla/${{ matrix.artifact }} ${{ matrix.renamed_artifact }}
-          tar -czf "$NAME.tar.gz" ${{ matrix.renamed_artifact }}
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.NAME }}
-          path: ${{ env.NAME }}.tar.gz
-
+  # Windows is built like JAX builds jaxlib locally on Windows, see
+  # .github/actions/build-windows (shared with release-cpu.yaml).
   windows:
-    name: Build cpu_windows-amd64
-    needs: plan
-    if: needs.plan.outputs.windows == 'true'
+    name: Build PJRT (windows)
     runs-on: windows-latest
     timeout-minutes: 360
+
+    env:
+      VERSION: ${{ github.event.inputs.commit_hash }}
+
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -249,32 +135,20 @@ jobs:
 
       - uses: ./pjrt-builds/.github/actions/build-windows
         with:
-          xla_commit: ${{ needs.plan.outputs.xla_commit }}
+          xla_commit: ${{ github.event.inputs.commit_hash }}
 
-      - uses: actions/upload-artifact@v4
+      - name: Name the asset
+        run: |
+          FILENAME="pjrt-${VERSION}-windows-x86_64.tar.gz"
+          mv pjrt-cpu_windows-amd64.tar.gz "$FILENAME"
+          echo "FILENAME=$FILENAME" >> $GITHUB_ENV
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
         with:
-          name: pjrt-cpu_windows-amd64
-          path: pjrt-cpu_windows-amd64.tar.gz
-
-  release:
-    needs: [plan, build, windows]
-    if: ${{ !cancelled() && inputs.release && !contains(needs.*.result, 'failure') }}
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.plan.outputs.tag }}
-          name: PJRT ${{ needs.plan.outputs.tag }}
-          target_commitish: ${{ github.sha }}
-          files: dist/*
-          body: |
-            Built from zml/pjrt-artifacts@${{ needs.plan.outputs.zml_sha }}.
-
-            - openxla/xla: ${{ needs.plan.outputs.xla_commit }}
-            - zml/xla (CUDA): ${{ needs.plan.outputs.cuda_xla_commit }}
-            - CUDA compute capabilities: ${{ inputs.cuda_compute_capabilities || 'zml default' }}
+          files: ${{ env.FILENAME }}
+          name: PJRT ${{ github.event.inputs.release_tag }}
+          tag_name: ${{ github.event.inputs.release_tag }}
+          prerelease: ${{ github.event.inputs.release_tag != 'pjrt' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

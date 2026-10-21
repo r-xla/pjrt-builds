@@ -25,12 +25,6 @@ on:
         description: "Space-separated builds to run, e.g. 'cpu_linux-amd64 cpu_windows-amd64'. Skips the release."
         required: false
         type: string
-      runner:
-        description: "Machines for the linux builds: GitHub-hosted, or RunsOn on our AWS account"
-        required: false
-        type: choice
-        options: [github, runs-on]
-        default: github
 
 permissions:
   contents: write
@@ -110,8 +104,7 @@ jobs:
         env:
           ONLY: ${{ inputs.only }}
         run: |
-          matrix=$(yq -o=json artifacts/.github/workflows/_build.yaml | python3 tools/zml-matrix.py \
-            | jq -c '.include |= map(select(.target == "cpu"))')
+          matrix=$(yq -o=json artifacts/.github/workflows/_build.yaml | python3 tools/zml-matrix.py)
           if [ "$(jq '.include | length' <<< "$matrix")" != 4 ]; then
             echo "::error::Expected 4 CPU builds in the pjrt-artifacts matrix"
             jq . <<< "$matrix"
@@ -133,15 +126,8 @@ jobs:
     name: Build ${{ matrix.target }}_${{ matrix.platform }}
     needs: plan
     if: needs.plan.outputs.matrix != '{"include":[]}'
-    # RunsOn: 32 spot cores and actions/cache backed by S3 (extras=s3-cache)
-    # instead of GitHub's 10 GB.
-    runs-on: >-
-      ${{ inputs.runner == 'runs-on'
-        && format('runs-on={0}/cpu=32/family={1}/image=ubuntu22-full-{2}/volume=200gb/extras=s3-cache',
-                  github.run_id,
-                  matrix.arch == 'arm64' && 'c7g+m7g' || 'c7a+c7i+m7a+m7i',
-                  matrix.arch)
-        || (matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04') }}
+    # Like zml, every platform builds on linux x86 (macOS cross-compiled).
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
     strategy:
       fail-fast: false
@@ -150,9 +136,6 @@ jobs:
       XLA_COMMIT: ${{ needs.plan.outputs.xla_commit }}
       NAME: pjrt-${{ matrix.target }}_${{ matrix.platform }}
     steps:
-      - uses: runs-on/action@v1
-        if: inputs.runner == 'runs-on'
-
       - uses: actions/checkout@v4
         with:
           path: pjrt-builds

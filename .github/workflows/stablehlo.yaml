@@ -4,8 +4,7 @@ on:
       tag_name:
         type: string
         description: 'Specify the release tag (e.g., v1.0.0)'
-        required: false
-        default: v1.12.1
+        required: true
 
 name: Build StableHLO
 
