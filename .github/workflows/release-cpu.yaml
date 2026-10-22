@@ -202,7 +202,7 @@ jobs:
     name: Build cpu_windows-amd64
     needs: plan
     if: needs.plan.outputs.windows == 'true'
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4

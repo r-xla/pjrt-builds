@@ -118,7 +118,7 @@ jobs:
   # .github/actions/build-windows (shared with release-cpu.yaml).
   windows:
     name: Build PJRT (windows)
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 360
 
     env:

@@ -30,8 +30,13 @@ this out and sharing it. What we took and changed:
 
 ### Windows
 
-Windows, which zml does not ship, is built like JAX builds jaxlib locally on Windows:
-`.github/actions/build-windows`, `bazelrc/windows/` and `patch/pjrt/windows/`.
+Windows, which zml does not ship, is built the way XLA's own Windows CI builds (and JAX's Windows wheels):
+with XLA's checked-in clang-cl toolchain config (`--config=xla_windows_x86_cpu_2022`), inside the container image
+that config is written for. The image comes from the XLA commit being built (`tools/windows-build-image.py`), so
+LLVM, MSVC and the Windows SDK are pinned by its digest and always match the toolchain config. XLA runs this
+build on Google's remote build service; we run it locally in the container on a `windows-2022` runner
+(`.github/actions/build-windows`, `bazelrc/windows/`, `patch/pjrt/windows/`). Like jaxlib, the DLL links the
+Visual C++ runtime dynamically, so it needs the Visual C++ Redistributable on the user's machine.
 
 ### Builds longer than 6 hours
 

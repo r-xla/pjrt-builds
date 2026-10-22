@@ -1,29 +1,19 @@
-# Windows CPU build with a local clang-cl, as JAX builds jaxlib locally on
-# Windows (its win_clang, avx_windows and clang configs). XLA's .bazelrc
-# imports this file and applies its own `windows` config on top.
+# Windows CPU build as XLA's own Windows CI builds (rbe_xla_windows_x86_cpu_2022
+# in tensorflow.bazelrc), without the remote execution: the same toolchain
+# config and platform, run locally inside the container image they are made for
+# (see .github/actions/build-windows). XLA's .bazelrc imports this file.
 
+# rbe_win_base, without rbe_base and the remote-only options.
 common --config=clang_local
-common --compiler=clang-cl
-common --extra_toolchains=@local_config_cc//:cc-toolchain-x64_windows-clang-cl
-# LLVM as installed by Chocolatey, by its short (8.3) path. Found on its own
-# under "C:\Program Files\LLVM", clang's builtin headers fail Bazel's include
-# check ("absolute path inclusion(s) found").
-common --repo_env=BAZEL_LLVM=C:/PROGRA~1/LLVM
-# Added by openxla/patches/windows. XLA's own win_clang config points at a
-# TensorFlow-only platform.
-common --extra_execution_platforms=//tools/toolchains/win_clang_cl:x64_windows-clang-cl
+common --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+common --shell_executable=C:/tools/msys64/usr/bin/bash.exe
+common --enable_runfiles
+common --nobuild_python_zip
+common --define=override_eigen_strong_inline=true
 
-# xla/tsl/util/filewrapper.cc emits ALIGN_ATTRIBUTE only under COMPILER_MSVC
-# or __GNUC__, and clang-cl defines neither. XLA's own Windows toolchains
-# (tools/toolchains/win2022) add it; the autoconfigured @local_config_cc does not.
-common --copt=-DCOMPILER_MSVC
-common --host_copt=-DCOMPILER_MSVC
+# XLA's checked-in clang-cl toolchain (LLVM, MSVC and Windows SDK of the image).
+common --config=xla_windows_x86_cpu_2022
 
-# Error on struct/class mismatches, which cause link failures on Windows.
-common --copt=-Werror=mismatched-tags
-common --copt=-Wno-gnu-offsetof-extensions
-common --copt=-Qunused-arguments
-common --copt=-Wno-error=c23-extensions
-
+# AVX2 baseline, like JAX's avx_windows and the x86-64-v3 of the other x86 builds.
 common --copt=-march=haswell
 common --host_copt=-march=haswell
