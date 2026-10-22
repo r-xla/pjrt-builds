@@ -4,21 +4,17 @@ name: Release PJRT CPU
 # openxla/xla commit and publishes them as the release pjrt-cpu-<short sha>.
 #
 # linux-amd64, linux-arm64, darwin-arm64 and darwin-amd64 are built the way
-# zml/pjrt-artifacts builds them, with the patches, bazelrc and bazel flags of
-# the pjrt-artifacts ref given below (zml cross-compiles macOS on linux with
-# hermetic toolchains). Their patches have to apply to the XLA commit. Only
-# zml's BuildBuddy remote build is left out. windows-amd64, which zml does not
-# ship, comes from .github/actions/build-windows.
+# zml/pjrt-artifacts builds them: hermetic toolchains on linux x86, macOS
+# cross-compiled, with their bazelrc (bazelrc/cpu), patches (patch/pjrt/cpu)
+# and bazel flags (the matrix below), copied into this repository. Only zml's
+# BuildBuddy remote build is left out. windows-amd64, which zml does not ship,
+# comes from .github/actions/build-windows.
 
 on:
   workflow_dispatch:
     inputs:
       xla_commit:
         description: "openxla/xla commit (short or full hash)"
-        required: true
-        type: string
-      artifacts:
-        description: "pjrt-artifacts ref whose patches, bazelrc and flags to use, as owner/repo@ref, e.g. zml/pjrt-artifacts@v18.0.0"
         required: true
         type: string
       only:
@@ -34,6 +30,8 @@ env:
   # save its cache within GitHub's 6 hour job limit. Re-running the failed job
   # continues from that cache.
   BUILD_MINUTES: 300
+  # The bazel version zml builds the CPU plugins with.
+  BAZEL_VERSION: 8.5.1
 
 jobs:
   plan:
@@ -43,34 +41,8 @@ jobs:
       windows: ${{ steps.matrix.outputs.windows }}
       xla_commit: ${{ steps.xla.outputs.commit }}
       tag: ${{ steps.xla.outputs.tag }}
-      artifacts_repo: ${{ steps.artifacts.outputs.repo }}
-      artifacts_sha: ${{ steps.artifacts.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Parse the pjrt-artifacts ref
-        id: ref
-        env:
-          ARTIFACTS: ${{ inputs.artifacts }}
-        run: |
-          if [[ ! "$ARTIFACTS" =~ ^([^/@]+/[^/@]+)@(.+)$ ]]; then
-            echo "::error::artifacts must look like owner/repo@ref, got '$ARTIFACTS'"
-            exit 1
-          fi
-          echo "repo=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
-          echo "ref=${BASH_REMATCH[2]}" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ steps.ref.outputs.repo }}
-          ref: ${{ steps.ref.outputs.ref }}
-          path: artifacts
-
-      - name: Pin the pjrt-artifacts commit
-        id: artifacts
-        run: |
-          echo "repo=${{ steps.ref.outputs.repo }}" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git -C artifacts rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       # Fails here, not hours into the builds, when the patches don't apply.
       - name: Resolve the XLA commit and check the patches apply
@@ -84,7 +56,7 @@ jobs:
           git -C xla checkout -q "$sha"
           shopt -s nullglob
           # Each set in order, as the builds apply them.
-          for set in "artifacts/openxla/patches/upstream/*.patch artifacts/openxla/patches/upstream-cpu/*.patch patch/pjrt/cpu/*.patch" "patch/pjrt/windows/*.patch"; do
+          for set in "patch/pjrt/cpu/*.patch" "patch/pjrt/windows/*.patch"; do
             for patch in $set; do
               git -C xla apply "../$patch" || { echo "::error::$patch does not apply to openxla/xla@$sha"; exit 1; }
               echo "ok $patch"
@@ -99,17 +71,30 @@ jobs:
           echo "commit=$sha" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Derive the build matrix from pjrt-artifacts'
+      # zml's CPU rows (.github/workflows/_build.yaml of zml/pjrt-artifacts),
+      # without the flags for their BuildBuddy remote build.
+      - name: Build matrix
         id: matrix
         env:
           ONLY: ${{ inputs.only }}
         run: |
-          matrix=$(yq -o=json artifacts/.github/workflows/_build.yaml | python3 tools/zml-matrix.py)
-          if [ "$(jq '.include | length' <<< "$matrix")" != 4 ]; then
-            echo "::error::Expected 4 CPU builds in the pjrt-artifacts matrix"
-            jq . <<< "$matrix"
-            exit 1
-          fi
+          matrix=$(jq -c . <<'JSON'
+          {"include": [
+            {"target": "cpu", "platform": "linux-amd64",
+             "config": "--config=hermetic_linux_x86 --config=baseline_x86_64 --config=bzlmod",
+             "artifact": "bazel-bin/xla/pjrt/c/libpjrt_c_api_cpu_plugin.so", "renamed_artifact": "libpjrt_cpu.so"},
+            {"target": "cpu", "platform": "linux-arm64",
+             "config": "--config=hermetic_linux_arm64 --config=baseline_arm64 --config=bzlmod",
+             "artifact": "bazel-bin/xla/pjrt/c/libpjrt_c_api_cpu_plugin.so", "renamed_artifact": "libpjrt_cpu.so"},
+            {"target": "cpu", "platform": "darwin-arm64",
+             "config": "--config=hermetic_macos_arm64 --config=bzlmod",
+             "artifact": "bazel-bin/xla/pjrt/c/libpjrt_c_api_cpu_plugin.dylib", "renamed_artifact": "libpjrt_cpu.dylib"},
+            {"target": "cpu", "platform": "darwin-amd64",
+             "config": "--config=hermetic_macos_x86 --config=bzlmod --//xla/tsl/framework/contraction:disable_onednn_contraction_kernel=True",
+             "artifact": "bazel-bin/xla/pjrt/c/libpjrt_c_api_cpu_plugin.dylib", "renamed_artifact": "libpjrt_cpu.dylib"}
+          ]}
+          JSON
+          )
           windows=true
           if [ -n "$ONLY" ]; then
             matrix=$(jq -c --arg only "$ONLY" '
@@ -142,25 +127,17 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          repository: ${{ needs.plan.outputs.artifacts_repo }}
-          ref: ${{ needs.plan.outputs.artifacts_sha }}
-          path: artifacts
-
-      - uses: actions/checkout@v4
-        with:
           repository: openxla/xla
           ref: ${{ env.XLA_COMMIT }}
           path: xla
 
-      # Like pjrt-artifacts' CPU build: its patches and bazelrc on top of
-      # openxla/xla, then ours.
+      # zml's CPU setup: their bazelrc replaces XLA's .bazelrc and
+      # tensorflow.bazelrc, then the patches.
       - name: Apply patches
         working-directory: xla
         run: |
-          shopt -s nullglob
-          patches=(../artifacts/openxla/patches/upstream/*.patch ../artifacts/openxla/patches/upstream-cpu/*.patch ../pjrt-builds/patch/pjrt/cpu/*.patch)
-          cp ../artifacts/openxla/bazelrc/upstream/.bazelrc ../artifacts/openxla/bazelrc/upstream/*.bazelrc .
-          for patch in "${patches[@]}"; do
+          cp ../pjrt-builds/bazelrc/cpu/.bazelrc ../pjrt-builds/bazelrc/cpu/tensorflow.bazelrc .
+          for patch in ../pjrt-builds/patch/pjrt/cpu/*.patch; do
             echo "Applying $patch"
             git apply "$patch"
           done
@@ -194,11 +171,11 @@ jobs:
         id: build
         working-directory: xla
         env:
-          USE_BAZEL_VERSION: ${{ matrix.bazel_version }}
+          USE_BAZEL_VERSION: ${{ env.BAZEL_VERSION }}
         run: |
           status=0
           timeout --signal=INT "${BUILD_MINUTES}m" \
-            bazel build ${{ matrix.config }} ${{ matrix.bazel_target }} || status=$?
+            bazel build ${{ matrix.config }} //xla/pjrt/c:pjrt_c_api_cpu_plugin || status=$?
           if [ "$status" = 124 ]; then
             echo "::error::Stopped after $BUILD_MINUTES minutes. Re-run the failed job to continue from the saved cache."
           fi
@@ -269,5 +246,4 @@ jobs:
           body: |
             PJRT CPU plugins built from openxla/xla@${{ needs.plan.outputs.xla_commit }}.
 
-            - linux-amd64, linux-arm64, darwin-arm64, darwin-amd64: patches, bazelrc and bazel flags of ${{ needs.plan.outputs.artifacts_repo }}@${{ needs.plan.outputs.artifacts_sha }}
-            - windows-amd64: .github/actions/build-windows of r-xla/pjrt-builds@${{ github.sha }}
+            Built with r-xla/pjrt-builds@${{ github.sha }}: linux and macOS with the build setup of zml/pjrt-artifacts (bazelrc/cpu, patch/pjrt/cpu), windows with .github/actions/build-windows.

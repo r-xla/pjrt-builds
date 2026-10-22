@@ -1,0 +1,80 @@
+# bazelrc of the linux and macOS CPU builds, replacing XLA's .bazelrc and
+# tensorflow.bazelrc. Copied from zml/pjrt-artifacts
+# (openxla/bazelrc/upstream/.bazelrc), keeping the CPU configs and leaving out
+# zml's BuildBuddy remote build and CUDA. tensorflow.bazelrc next to it is
+# their copy of XLA's, without the toolchain assumptions it makes per host
+# platform.
+
+# Disable Bzlmod for now
+common --noenable_bzlmod
+common:bzlmod --enable_bzlmod --noenable_workspace
+
+common --incompatible_enable_cc_toolchain_resolution
+common --repo_env USE_HERMETIC_CC_TOOLCHAIN=1
+
+# TODO: Migrate for https://github.com/bazelbuild/bazel/issues/7260
+common:clang_local --noincompatible_enable_cc_toolchain_resolution
+common:clang_local --@rules_ml_toolchain//common:enable_hermetic_cc=False
+common:clang_local --repo_env USE_HERMETIC_CC_TOOLCHAIN=0
+
+# Load the TensorFlow bazelrc
+import %workspace%/tensorflow.bazelrc
+import %workspace%/warnings.bazelrc
+
+try-import %workspace%/xla_configure.bazelrc
+
+####
+
+common:bzlmod --noincompatible_disallow_empty_glob
+
+# Additive-only configs for hermetic/custom cc toolchain flows.
+common:hermetic_clang --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+common:hermetic_clang --repo_env=BAZEL_NO_APPLE_CPP_TOOLCHAIN=1
+common:hermetic_clang --repo_env=BAZEL_DO_NOT_DETECT_SWIFT_TOOLCHAIN=1
+common:hermetic_clang --incompatible_enable_cc_toolchain_resolution
+common:hermetic_clang --repo_env=USE_HERMETIC_CC_TOOLCHAIN=1
+# common:hermetic_clang --@rules_ml_toolchain//common:enable_hermetic_cc=True
+common:hermetic_clang --@rules_python//python/config_settings:bootstrap_impl=script
+# zml registers these first in MODULE.bazel; patch/pjrt/cpu appends the
+# dependency instead, so they are put ahead of XLA's own toolchains here.
+common:hermetic_clang --extra_toolchains=@llvm//toolchain:all
+
+common:hermetic_linux_x86 --config=hermetic_clang
+common:hermetic_linux_x86 --config=avx_linux
+common:hermetic_linux_x86 --platforms @llvm//platforms:linux_x86_64
+common:hermetic_linux_x86 --cpu=k8
+
+common:hermetic_linux_arm64 --config=hermetic_clang
+common:hermetic_linux_arm64 --platforms @llvm//platforms:linux_aarch64
+common:hermetic_linux_arm64 --cpu=aarch64
+
+### OSX
+
+# Base build configs for macOS
+
+common:hermetic_macos_base --define=no_nccl_support=true --output_filter=^$
+common:hermetic_macos_base --config=cpu_cross
+common:hermetic_macos_base --config=hermetic_clang
+common:hermetic_macos_base --copt=-DGRPC_BAZEL_BUILD
+
+# Build configs for macOS Arm64
+common:hermetic_macos_arm64 --config=hermetic_macos_base
+common:hermetic_macos_arm64 --cpu=darwin_arm64
+common:hermetic_macos_arm64 --platforms=@build_bazel_apple_support//platforms:darwin_arm64
+common:hermetic_macos_arm64 --define=tensorflow_mkldnn_contraction_kernel=0 # release only stuff apparently
+# Target Moneterey as the minimum compatible OS version
+common:hermetic_macos_arm64 --macos_minimum_os=12.0
+# common:hermetic_macos_arm64 --macos_sdk_version=12.0
+
+# Build configs for macOS x86
+common:hermetic_macos_x86 --config=hermetic_macos_base
+common:hermetic_macos_x86 --config=avx_linux
+common:hermetic_macos_x86 --cpu=darwin
+common:hermetic_macos_x86 --platforms=@build_bazel_apple_support//platforms:darwin_x86_64
+# Target Catalina as the minimum compatible OS version
+common:hermetic_macos_x86 --macos_minimum_os=10.15
+# common:hermetic_macos_x86 --macos_sdk_version=10.15
+
+## BASELINES
+common:baseline_arm64   --copt=-march=armv8.2-a # LSE atomics, server baseline ~2018+
+common:baseline_x86_64  --copt=-march=x86-64-v3 # AVX2/FMA/BMI1/BMI2, Haswell-class servers+

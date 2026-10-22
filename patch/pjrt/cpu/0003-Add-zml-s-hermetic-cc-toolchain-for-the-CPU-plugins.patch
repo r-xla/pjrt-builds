@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sebastian Fischer <sebastian.fischer@stat.uni-muenchen.de>
+Date: Thu, 22 Oct 2026 13:42:29 +0200
+Subject: [PATCH 3/3] Add zml's hermetic cc toolchain for the CPU plugins
+
+Based on "Hermetic cc toolchain" by Corentin Kerisit in zml/pjrt-artifacts,
+appended to MODULE.bazel instead of inserted among the bazel_deps, with the
+toolchains registered in bazelrc/cpu/.bazelrc.
+---
+ MODULE.bazel | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/MODULE.bazel b/MODULE.bazel
+index 3a207154..c53c000f 100644
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -336,3 +336,18 @@ use_repo(pjrt_rc_number, "rc_number")
+ ### libdrm (dedicated extension to avoid Bzlmod merging issues)
+ libdrm_ext = use_extension("//third_party/libdrm:extension.bzl", "libdrm_ext")
+ use_repo(libdrm_ext, "libdrm")
++
++# Hermetic cc toolchain for the CPU plugins, as in zml/pjrt-artifacts. Appended
++# rather than placed among the other bazel_deps so that the patch applies to any
++# recent XLA commit; the toolchains are registered with --extra_toolchains
++# (bazelrc/cpu/.bazelrc) so that they win over the ones XLA registers.
++bazel_dep(name = "apple_support", version = "1.24.4", repo_name = "build_bazel_apple_support")
++bazel_dep(name = "llvm", version = "0.8.11")
++
++osx = use_extension("@llvm//extensions:osx.bzl", "osx")
++osx.from_archive(
++    sha256 = "1bde70c0b1c2ab89ff454acbebf6741390d7b7eb149ca2a3ca24cc9203a408b7",
++    strip_prefix = "Payload/Library/Developer/CommandLineTools/SDKs/MacOSX26.4.sdk",
++    type = "pkg",
++    urls = ["https://mirror.zml.ai/macos_sdks/26.4/CLTools_macOSNMOS_SDK.pkg"],
++)
+-- 
+2.25.1
+

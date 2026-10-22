@@ -5,25 +5,33 @@ Builds of the PJRT plugins and `stablehlo-opt` that the r-xla packages download.
 ## CPU release for an XLA commit
 
 `Release PJRT CPU` (`.github/workflows/release-cpu.yaml`) builds the PJRT CPU plugin for linux-amd64,
-linux-arm64, darwin-arm64, darwin-amd64 and windows-amd64 from one `openxla/xla` commit and publishes them as
-the release `pjrt-cpu-<short sha>`, with assets named like zml's: `pjrt-cpu_<os>-<arch>.tar.gz`.
+linux-arm64, darwin-arm64, darwin-amd64 and windows-amd64 from one `openxla/xla` commit (input `xla_commit`)
+and publishes them as the release `pjrt-cpu-<short sha>`, with assets `pjrt-cpu_<os>-<arch>.tar.gz`.
 
-Inputs:
+The run first checks that all patches apply to the commit and that the release does not exist yet. `only`
+(optional, e.g. `cpu_linux-amd64 cpu_windows-amd64`) restricts it to some builds and then skips the release.
 
-- `xla_commit`: the `openxla/xla` commit.
-- `artifacts`: the [zml/pjrt-artifacts](https://github.com/zml/pjrt-artifacts) ref (or a fork's) whose
-  patches, bazelrc and bazel flags the linux and macOS builds use, as `owner/repo@ref`. These builds copy zml's:
-  hermetic toolchains on linux x86, macOS cross-compiled, read from that ref at run time (`tools/zml-matrix.py`
-  drops only the flags for zml's BuildBuddy remote build). zml's patches only apply to XLA commits near their
-  pin, so a newer commit needs a ref with rebased patches, e.g.
-  - `zml/pjrt-artifacts@v18.0.0` for `6b73c4c`,
-  - `sebffischer/pjrt-artifacts@bump-xla-2026-10-21` for `aa1e72c`.
-- `only` (optional): space-separated builds, e.g. `cpu_linux-amd64 cpu_windows-amd64`. Skips the release.
+### Linux and macOS: zml's build setup
+
+The linux and macOS plugins are built with the build setup of [zml/pjrt-artifacts](https://github.com/zml/pjrt-artifacts)
+by [ZML](https://zml.ai), copied into this repository: hermetic LLVM toolchains on linux x86, macOS
+cross-compiled with a macOS SDK, the same bazel flags and Bazel version. Thanks to the ZML team for working
+this out and sharing it. What we took and changed:
+
+- `bazelrc/cpu/`: their `openxla/bazelrc/upstream/.bazelrc` and `tensorflow.bazelrc`, which replace XLA's.
+  We left out their BuildBuddy remote build and CUDA configs, and register their toolchains with
+  `--extra_toolchains` (see below).
+- `patch/pjrt/cpu/`: their CPU patches `0001` (plugin target name) and `0002` (macOS install name) as they are.
+  `0003` adds their hermetic toolchain, which they insert into XLA's `MODULE.bazel`; ours appends it to the end
+  of the file instead, so that it applies to any recent XLA commit rather than only to their pin. Their other
+  patches are left out: they are GPU-only, already upstream, or a small performance change that has to be
+  rebased for every XLA bump.
+- The build matrix in `release-cpu.yaml`: their CPU rows, without the remote build flags.
+
+### Windows
 
 Windows, which zml does not ship, is built like JAX builds jaxlib locally on Windows:
 `.github/actions/build-windows`, `bazelrc/windows/` and `patch/pjrt/windows/`.
-
-The run first checks that all patches apply and that the release does not exist yet.
 
 ### Builds longer than 6 hours
 
