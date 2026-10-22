@@ -11,9 +11,6 @@ name: Release PJRT CPU
 # comes from .github/actions/build-windows.
 
 on:
-  # Temporary: workflow_dispatch needs the file on main.
-  push:
-    branches: [cpu-release]
   workflow_dispatch:
     inputs:
       xla_commit:
@@ -51,7 +48,7 @@ jobs:
       - name: Resolve the XLA commit and check the patches apply
         id: xla
         env:
-          XLA_COMMIT: ${{ inputs.xla_commit || '6b73c4c' }}
+          XLA_COMMIT: ${{ inputs.xla_commit }}
           GH_TOKEN: ${{ github.token }}
         run: |
           git clone --filter=blob:none https://github.com/openxla/xla xla
