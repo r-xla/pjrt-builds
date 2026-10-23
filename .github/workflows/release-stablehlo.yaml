@@ -4,12 +4,14 @@ name: Release stablehlo-opt
 # openxla/stablehlo tag and publishes them as the release
 # stablehlo-opt-<tag>, with assets stablehlo-opt_<os>-<arch>.tar.gz.
 #
-# linux-amd64, linux-arm64 and darwin-arm64 use StableHLO's own Bazel build
-# with its hermetic toolchain (rules_ml_toolchain, in StableHLO since v1.19.0):
-# a pinned clang and, on linux, a glibc 2.27 sysroot. rules_ml_toolchain has no
-# toolchain for darwin-amd64 or windows-amd64, so those use StableHLO's CMake
-# build with a pinned LLVM on windows (clang-cl, patch/stablehlo). Both macOS
-# builds target MACOS_MIN.
+# linux-amd64 and linux-arm64 use StableHLO's own Bazel build with its
+# hermetic toolchain (rules_ml_toolchain, in StableHLO since v1.19.0): a pinned
+# clang and a glibc 2.27 sysroot. The macOS and windows builds use StableHLO's
+# CMake build: rules_ml_toolchain has no toolchain for darwin-amd64 or
+# windows-amd64, and the darwin-arm64 one in the version StableHLO pins is
+# broken (it references @llvm_darwin_aarch64//:distro_libs, which does not
+# exist). macOS targets MACOS_MIN, windows uses a pinned LLVM (clang-cl,
+# patch/stablehlo).
 #
 # The run first checks that the tag exists and has the hermetic toolchain, the
 # patches apply and the release does not exist yet. `only` restricts it to some
@@ -80,8 +82,7 @@ jobs:
             {"platform": "linux-amd64", "runner": "ubuntu-24.04", "build": "bazel"},
             {"platform": "linux-arm64", "runner": "ubuntu-24.04-arm", "build": "bazel",
              "toolchain": "linux_aarch64_linux_aarch64"},
-            {"platform": "darwin-arm64", "runner": "macos-15", "build": "bazel",
-             "toolchain": "darwin_aarch64_darwin_aarch64"},
+            {"platform": "darwin-arm64", "runner": "macos-15", "build": "cmake"},
             {"platform": "darwin-amd64", "runner": "macos-15-intel", "build": "cmake"},
             {"platform": "windows-amd64", "runner": "windows-2022", "build": "cmake"}
           ]}
@@ -127,17 +128,6 @@ jobs:
 
       # --- Bazel ---------------------------------------------------------------
 
-      # rules_ml_toolchain does not ship Apple's SDK; it expects it at this path
-      # in the workspace. Ruby's headers contain a symlink loop bazel trips on.
-      - name: Provide the macOS SDK
-        if: matrix.build == 'bazel' && runner.os == 'macOS'
-        run: |
-          sdk=$(cd "$(xcrun --show-sdk-path)" && pwd -P)
-          echo "::notice::Using $sdk"
-          mkdir -p stablehlo/cc/sysroots/darwin_aarch64
-          cp -R "$sdk" stablehlo/cc/sysroots/darwin_aarch64/MacOSX.sdk
-          find stablehlo/cc/sysroots/darwin_aarch64/MacOSX.sdk -path '*/Headers/ruby/ruby' -type l -delete
-
       - uses: bazel-contrib/setup-bazel@0.15.0
         if: matrix.build == 'bazel'
         with:
@@ -149,7 +139,7 @@ jobs:
         if: matrix.build == 'bazel'
         run: |
           root=$RUNNER_TEMP/bazel
-          if [ -d /mnt ] && [ "$RUNNER_OS" = Linux ]; then
+          if [ -d /mnt ]; then
             sudo mkdir -p /mnt/bazel && sudo chown "$USER" /mnt/bazel
             root=/mnt/bazel
           fi
@@ -170,7 +160,6 @@ jobs:
           key: bazel-${{ env.NAME }}-${{ env.STABLEHLO_TAG }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: bazel-${{ env.NAME }}-${{ env.STABLEHLO_TAG }}-
 
-      # The toolchain targets macOS 15.1; the trailing --target overrides it.
       - name: Build with bazel
         id: bazel
         if: matrix.build == 'bazel'
@@ -181,9 +170,6 @@ jobs:
         run: |
           flags=()
           [ -n "$TOOLCHAIN" ] && flags+=("--extra_toolchains=@rules_ml_toolchain//cc:$TOOLCHAIN")
-          if [ "$RUNNER_OS" = macOS ]; then
-            flags+=("--copt=--target=arm64-apple-macosx$MACOS_MIN" "--linkopt=--target=arm64-apple-macosx$MACOS_MIN")
-          fi
           bazel build -c opt "${flags[@]}" //:stablehlo-opt
           cp bazel-bin/stablehlo-opt ../stablehlo-opt-built
 
@@ -309,4 +295,4 @@ jobs:
           body: |
             stablehlo-opt built from openxla/stablehlo@${{ inputs.stablehlo_tag }}.
 
-            Built with r-xla/pjrt-builds@${{ github.sha }} (.github/workflows/release-stablehlo.yaml): linux and darwin-arm64 with StableHLO's hermetic Bazel build, darwin-amd64 and windows-amd64 with its CMake build.
+            Built with r-xla/pjrt-builds@${{ github.sha }} (.github/workflows/release-stablehlo.yaml): linux with StableHLO's hermetic Bazel build, macOS and windows with its CMake build.
