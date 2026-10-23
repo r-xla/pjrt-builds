@@ -1,0 +1,298 @@
+name: Release stablehlo-opt
+
+# Builds stablehlo-opt for every platform r-xla supports from one
+# openxla/stablehlo tag and publishes them as the release
+# stablehlo-opt-<tag>, with assets stablehlo-opt_<os>-<arch>.tar.gz.
+#
+# linux-amd64 and linux-arm64 use StableHLO's own Bazel build with its
+# hermetic toolchain (rules_ml_toolchain, in StableHLO since v1.19.0): a pinned
+# clang and a glibc 2.27 sysroot. The macOS and windows builds use StableHLO's
+# CMake build: rules_ml_toolchain has no toolchain for darwin-amd64 or
+# windows-amd64, and the darwin-arm64 one in the version StableHLO pins is
+# broken (it references @llvm_darwin_aarch64//:distro_libs, which does not
+# exist). macOS targets MACOS_MIN, windows uses a pinned LLVM (clang-cl,
+# patch/stablehlo).
+#
+# The run first checks that the tag exists and has the hermetic toolchain, the
+# patches apply and the release does not exist yet. `only` restricts it to some
+# builds and skips the release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      stablehlo_tag:
+        description: "openxla/stablehlo tag (v1.19.0 or later), e.g. v1.20.0"
+        required: true
+        type: string
+      only:
+        description: "Space-separated builds to run, e.g. 'linux-amd64 windows-amd64'. Skips the release."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  # Minutes bazel may build before the step is stopped so that the job can
+  # still save its cache within GitHub's 6 hour job limit. Re-running the
+  # failed job continues from that cache.
+  BUILD_MINUTES: 300
+  MACOS_MIN: "12.0"
+  WINDOWS_LLVM_VERSION: 21.1.8
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      tag: ${{ steps.stablehlo.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fails here, not hours into the builds.
+      - name: Check the tag, the patches and the release
+        id: stablehlo
+        env:
+          STABLEHLO_TAG: ${{ inputs.stablehlo_tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone -q --depth=1 --branch "$STABLEHLO_TAG" https://github.com/openxla/stablehlo stablehlo
+          grep -q '@rules_ml_toolchain//cc:' stablehlo/WORKSPACE.bazel || {
+            echo "::error::openxla/stablehlo@$STABLEHLO_TAG has no hermetic Bazel toolchain, use v1.19.0 or later"
+            exit 1
+          }
+          for patch in patch/stablehlo/*.patch; do
+            git -C stablehlo apply --check "../$patch" || { echo "::error::$patch does not apply to openxla/stablehlo@$STABLEHLO_TAG"; exit 1; }
+            echo "ok $patch"
+          done
+          tag="stablehlo-opt-$STABLEHLO_TAG"
+          if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $tag already exists. Delete it first to rebuild it."
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Build matrix
+        id: matrix
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          matrix=$(jq -c . <<'JSON'
+          {"include": [
+            {"platform": "linux-amd64", "runner": "ubuntu-24.04", "build": "bazel"},
+            {"platform": "linux-arm64", "runner": "ubuntu-24.04-arm", "build": "bazel",
+             "toolchain": "linux_aarch64_linux_aarch64"},
+            {"platform": "darwin-arm64", "runner": "macos-15", "build": "cmake"},
+            {"platform": "darwin-amd64", "runner": "macos-15-intel", "build": "cmake"},
+            {"platform": "windows-amd64", "runner": "windows-2022", "build": "cmake"}
+          ]}
+          JSON
+          )
+          if [ -n "$ONLY" ]; then
+            matrix=$(jq -c --arg only "$ONLY" '
+              ($only | split(" ")) as $keep
+              | .include |= map(select(.platform as $k | $keep | index($k)))
+            ' <<< "$matrix")
+          fi
+          jq . <<< "$matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.platform }} (${{ matrix.build }})
+    needs: plan
+    if: needs.plan.outputs.matrix != '{"include":[]}'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      STABLEHLO_TAG: ${{ inputs.stablehlo_tag }}
+      NAME: stablehlo-opt_${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pjrt-builds
+
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet /opt/hostedtoolcache /usr/local/share/boost /usr/local/.ghcup
+          df -h
+
+      - name: Clone stablehlo
+        run: git clone --depth=1 --branch "$STABLEHLO_TAG" https://github.com/openxla/stablehlo stablehlo
+
+      # --- Bazel ---------------------------------------------------------------
+
+      - uses: bazel-contrib/setup-bazel@0.15.0
+        if: matrix.build == 'bazel'
+        with:
+          bazelisk-version: 1.26.0
+          bazelisk-cache: false
+
+      # The large /mnt disk where the runner has one.
+      - name: Configure bazel
+        if: matrix.build == 'bazel'
+        run: |
+          root=$RUNNER_TEMP/bazel
+          if [ -d /mnt ]; then
+            sudo mkdir -p /mnt/bazel && sudo chown "$USER" /mnt/bazel
+            root=/mnt/bazel
+          fi
+          echo "BAZEL_DISK_CACHE=$root/disk" >> "$GITHUB_ENV"
+          cat >> ~/.bazelrc <<EOF
+          startup --output_user_root=$root/root
+          common --disk_cache=$root/disk
+          common --verbose_failures
+          common --color=yes
+          common --show_timestamps
+          EOF
+
+      - name: Restore the cache of an earlier attempt
+        if: matrix.build == 'bazel'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.BAZEL_DISK_CACHE }}
+          key: bazel-${{ env.NAME }}-${{ env.STABLEHLO_TAG }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: bazel-${{ env.NAME }}-${{ env.STABLEHLO_TAG }}-
+
+      - name: Build with bazel
+        id: bazel
+        if: matrix.build == 'bazel'
+        timeout-minutes: ${{ fromJSON(env.BUILD_MINUTES) }}
+        working-directory: stablehlo
+        env:
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        run: |
+          flags=()
+          [ -n "$TOOLCHAIN" ] && flags+=("--extra_toolchains=@rules_ml_toolchain//cc:$TOOLCHAIN")
+          bazel build -c opt "${flags[@]}" //:stablehlo-opt
+          cp bazel-bin/stablehlo-opt ../stablehlo-opt-built
+
+      # Re-running the failed job continues from this cache.
+      - name: Save the cache for a re-run
+        if: failure() && steps.bazel.outcome == 'failure'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.BAZEL_DISK_CACHE }}
+          key: bazel-${{ env.NAME }}-${{ env.STABLEHLO_TAG }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # --- CMake ---------------------------------------------------------------
+
+      # Use clang-cl, otherwise CMake picks MinGW, which fails.
+      - name: Install LLVM
+        if: matrix.build == 'cmake' && runner.os == 'Windows'
+        run: |
+          choco install llvm --version="$WINDOWS_LLVM_VERSION" -y
+          echo "CC=clang-cl" >> "$GITHUB_ENV"
+          echo "CXX=clang-cl" >> "$GITHUB_ENV"
+
+      - name: Clone the LLVM commit of stablehlo
+        if: matrix.build == 'cmake'
+        run: |
+          git init -q stablehlo/llvm-project
+          cd stablehlo/llvm-project
+          git remote add origin https://github.com/llvm/llvm-project.git
+          git fetch --depth=1 origin "$(cat ../build_tools/llvm_version.txt)"
+          git checkout -q FETCH_HEAD
+
+      # LLVM's assembly files don't build with clang-cl on the runner.
+      - name: Apply patches
+        if: matrix.build == 'cmake' && runner.os == 'Windows'
+        working-directory: stablehlo
+        run: |
+          for patch in ../pjrt-builds/patch/stablehlo/*.patch; do
+            echo "Applying $patch"
+            git apply "$patch"
+          done
+
+      # build_mlir.sh defaults CMAKE_BUILD_TYPE to RelWithDebInfo, and
+      # stablehlo-opt statically links the LLVM/MLIR archives it produces,
+      # with all their debug info.
+      - name: Build with CMake
+        if: matrix.build == 'cmake'
+        working-directory: stablehlo
+        run: |
+          [ "$RUNNER_OS" = macOS ] && export MACOSX_DEPLOYMENT_TARGET=$MACOS_MIN
+          CMAKE_BUILD_TYPE=Release MLIR_ENABLE_BINDINGS_PYTHON=OFF \
+            build_tools/build_mlir.sh "$PWD/llvm-project/" "$PWD/llvm-build"
+          cmake -B build -GNinja \
+            -DLLVM_ENABLE_LLD=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_ASSERTIONS=ON \
+            -DSTABLEHLO_ENABLE_BINDINGS_PYTHON=OFF \
+            -DMLIR_DIR="$PWD/llvm-build/lib/cmake/mlir"
+          cmake --build build --target stablehlo-opt
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp build/bin/stablehlo-opt.exe ../stablehlo-opt-built
+          else
+            cp build/bin/stablehlo-opt ../stablehlo-opt-built
+          fi
+
+      # --- Package -------------------------------------------------------------
+
+      # strip drops the symbol table. Not on Windows: GNU strip from the MSYS
+      # shell is not safe on a PE binary, and its debug info is in a .pdb we do
+      # not ship.
+      - name: Package
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            bin=stablehlo-opt.exe
+          else
+            bin=stablehlo-opt
+          fi
+          cp stablehlo-opt-built "$bin"
+          chmod u+w "$bin"
+          case "$RUNNER_OS" in
+            Linux)
+              strip "$bin"
+              echo "::notice::$NAME needs $(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+              ;;
+            macOS)
+              strip "$bin"
+              minos=$(otool -l "$bin" | awk '/LC_BUILD_VERSION/ {b=1} b && $1 == "minos" {print $2; exit}')
+              echo "::notice::$NAME needs macOS $minos"
+              [ "$minos" = "$MACOS_MIN" ] || { echo "::error::built for macOS $minos, not $MACOS_MIN"; exit 1; }
+              ;;
+          esac
+          ./"$bin" --version
+          tar -czf "$NAME.tar.gz" "$bin"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: ${{ env.NAME }}.tar.gz
+
+  release:
+    needs: [plan, build]
+    # Only complete sets: no release for runs restricted with `only`.
+    if: ${{ !cancelled() && inputs.only == '' && needs.build.result == 'success' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Check that all five binaries are there
+        run: |
+          ls -l dist
+          for p in linux-amd64 linux-arm64 darwin-arm64 darwin-amd64 windows-amd64; do
+            test -f "dist/stablehlo-opt_$p.tar.gz" || { echo "::error::missing stablehlo-opt_$p.tar.gz"; exit 1; }
+          done
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.plan.outputs.tag }}
+          name: stablehlo-opt ${{ inputs.stablehlo_tag }}
+          target_commitish: ${{ github.sha }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          body: |
+            stablehlo-opt built from openxla/stablehlo@${{ inputs.stablehlo_tag }}.
+
+            Built with r-xla/pjrt-builds@${{ github.sha }} (.github/workflows/release-stablehlo.yaml): linux with StableHLO's hermetic Bazel build, macOS and windows with its CMake build.
