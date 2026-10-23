@@ -57,10 +57,7 @@ jobs:
           shopt -s nullglob
           # Each set in order, as the builds apply them.
           for set in "patch/pjrt/cpu/*.patch" "patch/pjrt/windows/*.patch"; do
-            for patch in $set; do
-              git -C xla apply "../$patch" || { echo "::error::$patch does not apply to openxla/xla@$sha"; exit 1; }
-              echo "ok $patch"
-            done
+            tools/apply-patches.sh xla $set
             git -C xla checkout -q . && git -C xla clean -qfd
           done
           tag="pjrt-cpu-${sha:0:7}"
@@ -137,10 +134,7 @@ jobs:
         working-directory: xla
         run: |
           cp ../pjrt-builds/bazelrc/cpu/.bazelrc ../pjrt-builds/bazelrc/cpu/tensorflow.bazelrc .
-          for patch in ../pjrt-builds/patch/pjrt/cpu/*.patch; do
-            echo "Applying $patch"
-            git apply "$patch"
-          done
+          ../pjrt-builds/tools/apply-patches.sh . ../pjrt-builds/patch/pjrt/cpu/*.patch
 
       - name: Free disk space
         run: |
