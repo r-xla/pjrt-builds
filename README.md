@@ -8,7 +8,8 @@ Builds of the PJRT plugins and `stablehlo-opt` that the r-xla packages download.
 linux-arm64, darwin-arm64, darwin-amd64 and windows-amd64 from one `openxla/xla` commit (input `xla_commit`)
 and publishes them as the release `pjrt-cpu-<short sha>`, with assets `pjrt-cpu_<os>-<arch>.tar.gz`.
 
-The run first checks that all patches apply to the commit and that the release does not exist yet. `only`
+The run first checks that all patches apply to the commit (`tools/apply-patches.sh` skips one whose change the
+commit already has) and that the release does not exist yet. `only`
 (optional, e.g. `cpu_linux-amd64 cpu_windows-amd64`) restricts it to some builds and then skips the release.
 
 ### Linux and macOS: zml's build setup

@@ -35,10 +35,10 @@ runs:
       shell: bash
       working-directory: xla
       run: |
-        for patch in ../pjrt-builds/patch/pjrt/windows/*.patch; do
-          echo "Applying $patch"
-          git apply "$patch"
-        done
+        ../pjrt-builds/tools/apply-patches.sh . ../pjrt-builds/patch/pjrt/windows/*.patch
+        # Depending on the commit, XLA names the plugin target with or without
+        # the .so suffix; build.ps1 builds the one with it.
+        sed -i 's/name = "pjrt_c_api_cpu_plugin",/name = "pjrt_c_api_cpu_plugin.so",/' xla/pjrt/c/BUILD
         cp ../pjrt-builds/bazelrc/windows/xla_configure.bazelrc .
         cp ../pjrt-builds/.github/actions/build-windows/build.ps1 .
 
