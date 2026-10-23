@@ -114,13 +114,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Windows is built like JAX builds jaxlib locally on Windows (its win_clang,
-  # avx_windows and clang configs): a local clang-cl and XLA's own bazelrc,
-  # plus bazelrc/windows/xla_configure.bazelrc and patch/pjrt/windows.
-  # Mirrors the cpu windows-amd64 job proposed for zml/pjrt-artifacts.
+  # Windows is built like JAX builds jaxlib locally on Windows, see
+  # .github/actions/build-windows (shared with release-cpu.yaml).
   windows:
     name: Build PJRT (windows)
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 360
 
     env:
@@ -135,39 +133,14 @@ jobs:
         with:
           path: pjrt-builds
 
-      # actions/checkout only takes full SHAs; commit_hash is usually short.
-      - name: Clone openxla/xla
+      - uses: ./pjrt-builds/.github/actions/build-windows
+        with:
+          xla_commit: ${{ github.event.inputs.commit_hash }}
+
+      - name: Name the asset
         run: |
-          git clone --filter=blob:none https://github.com/openxla/xla xla
-          git -C xla checkout ${{ github.event.inputs.commit_hash }}
-
-      - name: Install LLVM
-        # The runner image's LLVM. 22.1.8 fails Bazel's include check on
-        # clang's builtin headers (lib/clang/22/include).
-        run: choco install llvm --version=20.1.8 --allow-downgrade -y
-
-      - name: Apply patches
-        working-directory: xla
-        run: |
-          for patch in ../pjrt-builds/patch/pjrt/windows/*.patch; do
-            echo "Applying $patch"
-            git apply "$patch"
-          done
-          cp ../pjrt-builds/bazelrc/windows/xla_configure.bazelrc .
-
-      - name: Build
-        working-directory: xla
-        run: bazel build //xla/pjrt/c:pjrt_c_api_cpu_plugin.so
-
-      - name: Check that the plugin exports GetPjrtApi
-        run: |
-          "C:/Program Files/LLVM/bin/llvm-readobj.exe" --coff-exports xla/bazel-bin/xla/pjrt/c/pjrt_c_api_cpu_plugin.so | grep -w GetPjrtApi
-
-      - name: Package
-        run: |
-          cp xla/bazel-bin/xla/pjrt/c/pjrt_c_api_cpu_plugin.so pjrt_cpu.dll
           FILENAME="pjrt-${VERSION}-windows-x86_64.tar.gz"
-          tar -czf "$FILENAME" pjrt_cpu.dll
+          mv pjrt-cpu_windows-amd64.tar.gz "$FILENAME"
           echo "FILENAME=$FILENAME" >> $GITHUB_ENV
 
       - name: Upload release asset

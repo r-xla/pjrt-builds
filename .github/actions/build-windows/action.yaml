@@ -1,0 +1,73 @@
+name: Build the Windows CPU plugin
+description: >-
+  Builds pjrt-cpu_windows-amd64.tar.gz (pjrt_cpu.dll) from an openxla/xla
+  commit the way XLA's own Windows CI builds: XLA's checked-in clang-cl
+  toolchain config, run inside the container image it is made for (LLVM, MSVC
+  and Windows SDK pinned by the image digest), with
+  bazelrc/windows/xla_configure.bazelrc and patch/pjrt/windows. XLA runs its
+  build remotely; here it runs locally in the container. Needs a windows-2022
+  runner (the image is Windows Server 2022) and this repository checked out at
+  pjrt-builds/.
+
+inputs:
+  xla_commit:
+    description: openxla/xla commit (short or full hash)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # actions/checkout only takes full SHAs.
+    - name: Clone openxla/xla
+      shell: bash
+      run: |
+        git clone --filter=blob:none https://github.com/openxla/xla xla
+        git -C xla checkout "${{ inputs.xla_commit }}"
+
+    - name: Find the build image of this XLA commit
+      shell: bash
+      run: |
+        image=$(python pjrt-builds/tools/windows-build-image.py xla)
+        echo "::notice::Building in $image"
+        echo "IMAGE=$image" >> "$GITHUB_ENV"
+
+    - name: Apply patches
+      shell: bash
+      working-directory: xla
+      run: |
+        for patch in ../pjrt-builds/patch/pjrt/windows/*.patch; do
+          echo "Applying $patch"
+          git apply "$patch"
+        done
+        cp ../pjrt-builds/bazelrc/windows/xla_configure.bazelrc .
+        cp ../pjrt-builds/.github/actions/build-windows/build.ps1 .
+
+    - name: Pull the build image
+      shell: bash
+      run: |
+        df -h /c /d 2>/dev/null || true
+        docker pull "$IMAGE"
+
+    # Process isolation runs the container on the runner's own kernel, which
+    # has to match the image's Windows version.
+    - name: Build in the container
+      shell: bash
+      env:
+        MSYS_NO_PATHCONV: "1"
+      run: |
+        docker run --rm --isolation=process --storage-opt size=150G \
+          -v "$(cygpath -w "$PWD/xla"):C:\\xla" \
+          --entrypoint "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" \
+          "$IMAGE" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "C:\\xla\\build.ps1"
+
+    # With the runner's LLVM, independent of what the build image ships.
+    - name: Check that the plugin exports GetPjrtApi
+      shell: bash
+      run: |
+        "C:/Program Files/LLVM/bin/llvm-readobj.exe" --coff-exports xla/pjrt_cpu.dll | grep -w GetPjrtApi
+
+    - name: Package
+      shell: bash
+      run: |
+        cp xla/pjrt_cpu.dll pjrt_cpu.dll
+        tar -czf pjrt-cpu_windows-amd64.tar.gz pjrt_cpu.dll
