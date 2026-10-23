@@ -1,0 +1,209 @@
+name: Release stablehlo-opt
+
+# Builds stablehlo-opt for every platform r-xla supports from one
+# openxla/stablehlo tag and publishes them as the release
+# stablehlo-opt-<tag>, with assets stablehlo-opt_<os>-<arch>.tar.gz. Each
+# platform builds natively on its own runner, with the LLVM commit pinned by
+# the tag (build_tools/llvm_version.txt); Windows uses clang-cl and
+# patch/stablehlo.
+#
+# The run first checks that the tag exists, the patches apply and the release
+# does not exist yet. `only` restricts it to some builds and skips the release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      stablehlo_tag:
+        description: "openxla/stablehlo tag, e.g. v1.12.1"
+        required: true
+        type: string
+      only:
+        description: "Space-separated builds to run, e.g. 'linux-amd64 windows-amd64'. Skips the release."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      tag: ${{ steps.stablehlo.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fails here, not hours into the builds, when the tag does not exist or
+      # the patches don't apply.
+      - name: Check the tag, the patches and the release
+        id: stablehlo
+        env:
+          STABLEHLO_TAG: ${{ inputs.stablehlo_tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone -q --depth=1 --branch "$STABLEHLO_TAG" https://github.com/openxla/stablehlo stablehlo
+          for patch in patch/stablehlo/*.patch; do
+            git -C stablehlo apply --check "../$patch" || { echo "::error::$patch does not apply to openxla/stablehlo@$STABLEHLO_TAG"; exit 1; }
+            echo "ok $patch"
+          done
+          tag="stablehlo-opt-$STABLEHLO_TAG"
+          if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $tag already exists. Delete it first to rebuild it."
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Build matrix
+        id: matrix
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          matrix=$(jq -c . <<'JSON'
+          {"include": [
+            {"platform": "linux-amd64", "runner": "ubuntu-24.04"},
+            {"platform": "linux-arm64", "runner": "ubuntu-24.04-arm"},
+            {"platform": "darwin-arm64", "runner": "macos-15"},
+            {"platform": "darwin-amd64", "runner": "macos-15-intel"},
+            {"platform": "windows-amd64", "runner": "windows-2022"}
+          ]}
+          JSON
+          )
+          if [ -n "$ONLY" ]; then
+            matrix=$(jq -c --arg only "$ONLY" '
+              ($only | split(" ")) as $keep
+              | .include |= map(select(.platform as $k | $keep | index($k)))
+            ' <<< "$matrix")
+          fi
+          jq . <<< "$matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: plan
+    if: needs.plan.outputs.matrix != '{"include":[]}'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      STABLEHLO_TAG: ${{ inputs.stablehlo_tag }}
+      NAME: stablehlo-opt_${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pjrt-builds
+
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet /opt/hostedtoolcache /usr/local/share/boost /usr/local/.ghcup
+          df -h
+
+      # build_mlir.sh links LLVM with lld everywhere but on macOS.
+      - name: Install lld and ninja
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y lld ninja-build
+
+      # Use clang-cl, otherwise CMake picks MinGW, which fails.
+      - name: Install LLVM
+        if: runner.os == 'Windows'
+        run: |
+          choco install llvm -y
+          echo "CC=clang-cl" >> "$GITHUB_ENV"
+          echo "CXX=clang-cl" >> "$GITHUB_ENV"
+
+      - name: Clone stablehlo and its LLVM commit
+        run: |
+          git clone --depth=1 --branch "$STABLEHLO_TAG" https://github.com/openxla/stablehlo stablehlo
+          git init -q stablehlo/llvm-project
+          cd stablehlo/llvm-project
+          git remote add origin https://github.com/llvm/llvm-project.git
+          git fetch --depth=1 origin "$(cat ../build_tools/llvm_version.txt)"
+          git checkout -q FETCH_HEAD
+
+      # LLVM's assembly files don't build with clang-cl on the runner.
+      - name: Apply patches
+        if: runner.os == 'Windows'
+        working-directory: stablehlo
+        run: |
+          for patch in ../pjrt-builds/patch/stablehlo/*.patch; do
+            echo "Applying $patch"
+            git apply "$patch"
+          done
+
+      # build_mlir.sh defaults CMAKE_BUILD_TYPE to RelWithDebInfo, and
+      # stablehlo-opt statically links the LLVM/MLIR archives it produces. On
+      # ELF the DWARF from those archives is copied into the linked
+      # executable, which made the Linux binaries ~2.2 GB.
+      - name: Build MLIR
+        working-directory: stablehlo
+        run: |
+          CMAKE_BUILD_TYPE=Release MLIR_ENABLE_BINDINGS_PYTHON=OFF \
+            build_tools/build_mlir.sh "$PWD/llvm-project/" "$PWD/llvm-build"
+
+      - name: Build stablehlo-opt
+        working-directory: stablehlo
+        run: |
+          cmake -B build -GNinja \
+            -DLLVM_ENABLE_LLD=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_ASSERTIONS=ON \
+            -DSTABLEHLO_ENABLE_BINDINGS_PYTHON=OFF \
+            -DMLIR_DIR="$PWD/llvm-build/lib/cmake/mlir"
+          cmake --build build --target stablehlo-opt
+
+      # strip drops the symbol table and any remaining debug sections. Not on
+      # Windows: GNU strip from the MSYS shell is not safe on a PE binary, and
+      # its debug info is in a .pdb we do not ship.
+      - name: Package
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            bin=stablehlo-opt.exe
+            cp "stablehlo/build/bin/$bin" "$bin"
+          else
+            bin=stablehlo-opt
+            cp "stablehlo/build/bin/$bin" "$bin"
+            strip "$bin"
+          fi
+          ./"$bin" --version
+          tar -czf "$NAME.tar.gz" "$bin"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: ${{ env.NAME }}.tar.gz
+
+  release:
+    needs: [plan, build]
+    # Only complete sets: no release for runs restricted with `only`.
+    if: ${{ !cancelled() && inputs.only == '' && needs.build.result == 'success' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Check that all five binaries are there
+        run: |
+          ls -l dist
+          for p in linux-amd64 linux-arm64 darwin-arm64 darwin-amd64 windows-amd64; do
+            test -f "dist/stablehlo-opt_$p.tar.gz" || { echo "::error::missing stablehlo-opt_$p.tar.gz"; exit 1; }
+          done
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.plan.outputs.tag }}
+          name: stablehlo-opt ${{ inputs.stablehlo_tag }}
+          target_commitish: ${{ github.sha }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          body: |
+            stablehlo-opt built from openxla/stablehlo@${{ inputs.stablehlo_tag }}.
+
+            Built with r-xla/pjrt-builds@${{ github.sha }} (.github/workflows/release-stablehlo.yaml).
