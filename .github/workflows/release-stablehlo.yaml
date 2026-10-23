@@ -2,19 +2,24 @@ name: Release stablehlo-opt
 
 # Builds stablehlo-opt for every platform r-xla supports from one
 # openxla/stablehlo tag and publishes them as the release
-# stablehlo-opt-<tag>, with assets stablehlo-opt_<os>-<arch>.tar.gz. Each
-# platform builds natively on its own runner, with the LLVM commit pinned by
-# the tag (build_tools/llvm_version.txt); Windows uses clang-cl and
-# patch/stablehlo.
+# stablehlo-opt-<tag>, with assets stablehlo-opt_<os>-<arch>.tar.gz.
 #
-# The run first checks that the tag exists, the patches apply and the release
-# does not exist yet. `only` restricts it to some builds and skips the release.
+# linux-amd64, linux-arm64 and darwin-arm64 use StableHLO's own Bazel build
+# with its hermetic toolchain (rules_ml_toolchain, in StableHLO since v1.19.0):
+# a pinned clang and, on linux, a glibc 2.27 sysroot. rules_ml_toolchain has no
+# toolchain for darwin-amd64 or windows-amd64, so those use StableHLO's CMake
+# build with a pinned LLVM on windows (clang-cl, patch/stablehlo). Both macOS
+# builds target MACOS_MIN.
+#
+# The run first checks that the tag exists and has the hermetic toolchain, the
+# patches apply and the release does not exist yet. `only` restricts it to some
+# builds and skips the release.
 
 on:
   workflow_dispatch:
     inputs:
       stablehlo_tag:
-        description: "openxla/stablehlo tag, e.g. v1.12.1"
+        description: "openxla/stablehlo tag (v1.19.0 or later), e.g. v1.20.0"
         required: true
         type: string
       only:
@@ -25,6 +30,14 @@ on:
 permissions:
   contents: write
 
+env:
+  # Minutes bazel may build before the step is stopped so that the job can
+  # still save its cache within GitHub's 6 hour job limit. Re-running the
+  # failed job continues from that cache.
+  BUILD_MINUTES: 300
+  MACOS_MIN: "12.0"
+  WINDOWS_LLVM_VERSION: 21.1.8
+
 jobs:
   plan:
     runs-on: ubuntu-24.04
@@ -34,8 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Fails here, not hours into the builds, when the tag does not exist or
-      # the patches don't apply.
+      # Fails here, not hours into the builds.
       - name: Check the tag, the patches and the release
         id: stablehlo
         env:
@@ -43,6 +55,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           git clone -q --depth=1 --branch "$STABLEHLO_TAG" https://github.com/openxla/stablehlo stablehlo
+          grep -q '@rules_ml_toolchain//cc:' stablehlo/WORKSPACE.bazel || {
+            echo "::error::openxla/stablehlo@$STABLEHLO_TAG has no hermetic Bazel toolchain, use v1.19.0 or later"
+            exit 1
+          }
           for patch in patch/stablehlo/*.patch; do
             git -C stablehlo apply --check "../$patch" || { echo "::error::$patch does not apply to openxla/stablehlo@$STABLEHLO_TAG"; exit 1; }
             echo "ok $patch"
@@ -61,11 +77,13 @@ jobs:
         run: |
           matrix=$(jq -c . <<'JSON'
           {"include": [
-            {"platform": "linux-amd64", "runner": "ubuntu-24.04"},
-            {"platform": "linux-arm64", "runner": "ubuntu-24.04-arm"},
-            {"platform": "darwin-arm64", "runner": "macos-15"},
-            {"platform": "darwin-amd64", "runner": "macos-15-intel"},
-            {"platform": "windows-amd64", "runner": "windows-2022"}
+            {"platform": "linux-amd64", "runner": "ubuntu-24.04", "build": "bazel"},
+            {"platform": "linux-arm64", "runner": "ubuntu-24.04-arm", "build": "bazel",
+             "toolchain": "linux_aarch64_linux_aarch64"},
+            {"platform": "darwin-arm64", "runner": "macos-15", "build": "bazel",
+             "toolchain": "darwin_aarch64_darwin_aarch64"},
+            {"platform": "darwin-amd64", "runner": "macos-15-intel", "build": "cmake"},
+            {"platform": "windows-amd64", "runner": "windows-2022", "build": "cmake"}
           ]}
           JSON
           )
@@ -79,7 +97,7 @@ jobs:
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   build:
-    name: Build ${{ matrix.platform }}
+    name: Build ${{ matrix.platform }} (${{ matrix.build }})
     needs: plan
     if: needs.plan.outputs.matrix != '{"include":[]}'
     runs-on: ${{ matrix.runner }}
@@ -104,22 +122,92 @@ jobs:
           sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet /opt/hostedtoolcache /usr/local/share/boost /usr/local/.ghcup
           df -h
 
-      # build_mlir.sh links LLVM with lld everywhere but on macOS.
-      - name: Install lld and ninja
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y lld ninja-build
+      - name: Clone stablehlo
+        run: git clone --depth=1 --branch "$STABLEHLO_TAG" https://github.com/openxla/stablehlo stablehlo
+
+      # --- Bazel ---------------------------------------------------------------
+
+      # rules_ml_toolchain does not ship Apple's SDK; it expects it at this path
+      # in the workspace. Ruby's headers contain a symlink loop bazel trips on.
+      - name: Provide the macOS SDK
+        if: matrix.build == 'bazel' && runner.os == 'macOS'
+        run: |
+          sdk=$(cd "$(xcrun --show-sdk-path)" && pwd -P)
+          echo "::notice::Using $sdk"
+          mkdir -p stablehlo/cc/sysroots/darwin_aarch64
+          cp -R "$sdk" stablehlo/cc/sysroots/darwin_aarch64/MacOSX.sdk
+          find stablehlo/cc/sysroots/darwin_aarch64/MacOSX.sdk -path '*/Headers/ruby/ruby' -type l -delete
+
+      - uses: bazel-contrib/setup-bazel@0.15.0
+        if: matrix.build == 'bazel'
+        with:
+          bazelisk-version: 1.26.0
+          bazelisk-cache: false
+
+      # The large /mnt disk where the runner has one.
+      - name: Configure bazel
+        if: matrix.build == 'bazel'
+        run: |
+          root=$RUNNER_TEMP/bazel
+          if [ -d /mnt ] && [ "$RUNNER_OS" = Linux ]; then
+            sudo mkdir -p /mnt/bazel && sudo chown "$USER" /mnt/bazel
+            root=/mnt/bazel
+          fi
+          echo "BAZEL_DISK_CACHE=$root/disk" >> "$GITHUB_ENV"
+          cat >> ~/.bazelrc <<EOF
+          startup --output_user_root=$root/root
+          common --disk_cache=$root/disk
+          common --verbose_failures
+          common --color=yes
+          common --show_timestamps
+          EOF
+
+      - name: Restore the cache of an earlier attempt
+        if: matrix.build == 'bazel'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.BAZEL_DISK_CACHE }}
+          key: bazel-${{ env.NAME }}-${{ env.STABLEHLO_TAG }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: bazel-${{ env.NAME }}-${{ env.STABLEHLO_TAG }}-
+
+      # The toolchain targets macOS 15.1; the trailing --target overrides it.
+      - name: Build with bazel
+        id: bazel
+        if: matrix.build == 'bazel'
+        timeout-minutes: ${{ fromJSON(env.BUILD_MINUTES) }}
+        working-directory: stablehlo
+        env:
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        run: |
+          flags=()
+          [ -n "$TOOLCHAIN" ] && flags+=("--extra_toolchains=@rules_ml_toolchain//cc:$TOOLCHAIN")
+          if [ "$RUNNER_OS" = macOS ]; then
+            flags+=("--copt=--target=arm64-apple-macosx$MACOS_MIN" "--linkopt=--target=arm64-apple-macosx$MACOS_MIN")
+          fi
+          bazel build -c opt "${flags[@]}" //:stablehlo-opt
+          cp bazel-bin/stablehlo-opt ../stablehlo-opt-built
+
+      # Re-running the failed job continues from this cache.
+      - name: Save the cache for a re-run
+        if: failure() && steps.bazel.outcome == 'failure'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.BAZEL_DISK_CACHE }}
+          key: bazel-${{ env.NAME }}-${{ env.STABLEHLO_TAG }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # --- CMake ---------------------------------------------------------------
 
       # Use clang-cl, otherwise CMake picks MinGW, which fails.
       - name: Install LLVM
-        if: runner.os == 'Windows'
+        if: matrix.build == 'cmake' && runner.os == 'Windows'
         run: |
-          choco install llvm -y
+          choco install llvm --version="$WINDOWS_LLVM_VERSION" -y
           echo "CC=clang-cl" >> "$GITHUB_ENV"
           echo "CXX=clang-cl" >> "$GITHUB_ENV"
 
-      - name: Clone stablehlo and its LLVM commit
+      - name: Clone the LLVM commit of stablehlo
+        if: matrix.build == 'cmake'
         run: |
-          git clone --depth=1 --branch "$STABLEHLO_TAG" https://github.com/openxla/stablehlo stablehlo
           git init -q stablehlo/llvm-project
           cd stablehlo/llvm-project
           git remote add origin https://github.com/llvm/llvm-project.git
@@ -128,7 +216,7 @@ jobs:
 
       # LLVM's assembly files don't build with clang-cl on the runner.
       - name: Apply patches
-        if: runner.os == 'Windows'
+        if: matrix.build == 'cmake' && runner.os == 'Windows'
         working-directory: stablehlo
         run: |
           for patch in ../pjrt-builds/patch/stablehlo/*.patch; do
@@ -137,18 +225,15 @@ jobs:
           done
 
       # build_mlir.sh defaults CMAKE_BUILD_TYPE to RelWithDebInfo, and
-      # stablehlo-opt statically links the LLVM/MLIR archives it produces. On
-      # ELF the DWARF from those archives is copied into the linked
-      # executable, which made the Linux binaries ~2.2 GB.
-      - name: Build MLIR
+      # stablehlo-opt statically links the LLVM/MLIR archives it produces,
+      # with all their debug info.
+      - name: Build with CMake
+        if: matrix.build == 'cmake'
         working-directory: stablehlo
         run: |
+          [ "$RUNNER_OS" = macOS ] && export MACOSX_DEPLOYMENT_TARGET=$MACOS_MIN
           CMAKE_BUILD_TYPE=Release MLIR_ENABLE_BINDINGS_PYTHON=OFF \
             build_tools/build_mlir.sh "$PWD/llvm-project/" "$PWD/llvm-build"
-
-      - name: Build stablehlo-opt
-        working-directory: stablehlo
-        run: |
           cmake -B build -GNinja \
             -DLLVM_ENABLE_LLD=OFF \
             -DCMAKE_BUILD_TYPE=Release \
@@ -156,20 +241,38 @@ jobs:
             -DSTABLEHLO_ENABLE_BINDINGS_PYTHON=OFF \
             -DMLIR_DIR="$PWD/llvm-build/lib/cmake/mlir"
           cmake --build build --target stablehlo-opt
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp build/bin/stablehlo-opt.exe ../stablehlo-opt-built
+          else
+            cp build/bin/stablehlo-opt ../stablehlo-opt-built
+          fi
 
-      # strip drops the symbol table and any remaining debug sections. Not on
-      # Windows: GNU strip from the MSYS shell is not safe on a PE binary, and
-      # its debug info is in a .pdb we do not ship.
+      # --- Package -------------------------------------------------------------
+
+      # strip drops the symbol table. Not on Windows: GNU strip from the MSYS
+      # shell is not safe on a PE binary, and its debug info is in a .pdb we do
+      # not ship.
       - name: Package
         run: |
           if [ "$RUNNER_OS" = Windows ]; then
             bin=stablehlo-opt.exe
-            cp "stablehlo/build/bin/$bin" "$bin"
           else
             bin=stablehlo-opt
-            cp "stablehlo/build/bin/$bin" "$bin"
-            strip "$bin"
           fi
+          cp stablehlo-opt-built "$bin"
+          chmod u+w "$bin"
+          case "$RUNNER_OS" in
+            Linux)
+              strip "$bin"
+              echo "::notice::$NAME needs $(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+              ;;
+            macOS)
+              strip "$bin"
+              minos=$(otool -l "$bin" | awk '/LC_BUILD_VERSION/ {b=1} b && $1 == "minos" {print $2; exit}')
+              echo "::notice::$NAME needs macOS $minos"
+              [ "$minos" = "$MACOS_MIN" ] || { echo "::error::built for macOS $minos, not $MACOS_MIN"; exit 1; }
+              ;;
+          esac
           ./"$bin" --version
           tar -czf "$NAME.tar.gz" "$bin"
 
@@ -206,4 +309,4 @@ jobs:
           body: |
             stablehlo-opt built from openxla/stablehlo@${{ inputs.stablehlo_tag }}.
 
-            Built with r-xla/pjrt-builds@${{ github.sha }} (.github/workflows/release-stablehlo.yaml).
+            Built with r-xla/pjrt-builds@${{ github.sha }} (.github/workflows/release-stablehlo.yaml): linux and darwin-arm64 with StableHLO's hermetic Bazel build, darwin-amd64 and windows-amd64 with its CMake build.
