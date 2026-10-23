@@ -57,8 +57,14 @@ runs:
       run: |
         docker run --rm --isolation=process --storage-opt size=150G \
           -v "$(cygpath -w "$PWD/xla"):C:\\xla" \
-          --entrypoint "C:\\Program Files\\PowerShell\\7\\pwsh.exe" \
-          "$IMAGE" -NoLogo -NoProfile -File "C:\\xla\\build.ps1"
+          --entrypoint "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" \
+          "$IMAGE" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "C:\\xla\\build.ps1"
+
+    # With the runner's LLVM, independent of what the build image ships.
+    - name: Check that the plugin exports GetPjrtApi
+      shell: bash
+      run: |
+        "C:/Program Files/LLVM/bin/llvm-readobj.exe" --coff-exports xla/pjrt_cpu.dll | grep -w GetPjrtApi
 
     - name: Package
       shell: bash
