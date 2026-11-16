@@ -23,8 +23,9 @@ this out and sharing it. What we took and changed:
   `--extra_toolchains` (see below).
 - `patch/pjrt/cpu/`: their CPU patches `0001` (plugin target name) and `0002` (macOS install name) as they are.
   `0003` adds their hermetic toolchain, which they insert into XLA's `MODULE.bazel`; ours appends it to the end
-  of the file instead, so that it applies to any recent XLA commit rather than only to their pin. Their other
-  patches are left out: they are GPU-only, already upstream, or a small performance change that has to be
+  of the file instead, so that it applies to any recent XLA commit rather than only to their pin. It leaves out
+  their `bazel_dep` on `apple_support`, which XLA declares itself since openxla/xla@d7282d5 (bzlmod rejects a
+  second one), so it needs an XLA commit from 2026-10-26 or later. Their other patches are left out: they are GPU-only, already upstream, or a small performance change that has to be
   rebased for every XLA bump.
 - The build matrix in `release-cpu.yaml`: their CPU rows, without the remote build flags.
 
