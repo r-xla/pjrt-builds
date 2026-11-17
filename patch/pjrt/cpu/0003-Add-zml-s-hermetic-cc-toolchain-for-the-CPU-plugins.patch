@@ -5,16 +5,18 @@ Subject: [PATCH 3/3] Add zml's hermetic cc toolchain for the CPU plugins
 
 Based on "Hermetic cc toolchain" by Corentin Kerisit in zml/pjrt-artifacts,
 appended to MODULE.bazel instead of inserted among the bazel_deps, with the
-toolchains registered in bazelrc/cpu/.bazelrc.
+toolchains registered in bazelrc/cpu/.bazelrc. zml's bazel_dep on
+apple_support is left out: XLA declares apple_support itself since
+openxla/xla@d7282d5, and bzlmod rejects a second bazel_dep on a module.
 ---
  MODULE.bazel | 15 +++++++++++++++
  1 file changed, 15 insertions(+)
 
 diff --git a/MODULE.bazel b/MODULE.bazel
-index 3a207154..c53c000f 100644
+index 57450deb..418e3677 100644
 --- a/MODULE.bazel
 +++ b/MODULE.bazel
-@@ -336,3 +336,18 @@ use_repo(pjrt_rc_number, "rc_number")
+@@ -362,3 +362,18 @@ use_repo(pjrt_rc_number, "rc_number")
  ### libdrm (dedicated extension to avoid Bzlmod merging issues)
  libdrm_ext = use_extension("//third_party/libdrm:extension.bzl", "libdrm_ext")
  use_repo(libdrm_ext, "libdrm")
@@ -22,8 +24,8 @@ index 3a207154..c53c000f 100644
 +# Hermetic cc toolchain for the CPU plugins, as in zml/pjrt-artifacts. Appended
 +# rather than placed among the other bazel_deps so that the patch applies to any
 +# recent XLA commit; the toolchains are registered with --extra_toolchains
-+# (bazelrc/cpu/.bazelrc) so that they win over the ones XLA registers.
-+bazel_dep(name = "apple_support", version = "1.24.4", repo_name = "build_bazel_apple_support")
++# (bazelrc/cpu/.bazelrc) so that they win over the ones XLA registers. The
++# macOS platforms come from XLA's own bazel_dep on apple_support.
 +bazel_dep(name = "llvm", version = "0.8.11")
 +
 +osx = use_extension("@llvm//extensions:osx.bzl", "osx")
